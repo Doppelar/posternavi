@@ -11,7 +11,7 @@ import { clear, load, save } from "./store.js";
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-const DEFAULT_SETTINGS = { mode: "walking", workMin: 3, teams: 1, returnToStart: true, endFixed: false, skipDone: true, roads: true };
+const DEFAULT_SETTINGS = { mode: "driving", workMin: 3, teams: 1, returnToStart: true, endFixed: false, skipDone: true, roads: true };
 const CITY = { name: "小諸市", center: [36.3275, 138.4256], zoom: 13 };
 const SAMPLE_START = { lat: 36.32653, lon: 138.42554, label: "見本の出発地点" };
 const BUSY_TEXT = "ルートを計算しています…";
@@ -70,9 +70,19 @@ function teamDepot(i) {
   const { settings } = state;
   const start = tp.start || state.start;
   const end = tp.end || (settings.returnToStart ? start : settings.endFixed ? state.end : null);
-  return { start, end };
+  return { start, end, mode: tp.mode || settings.mode };
 }
-const hasTeamPlaces = (teams) => state.teamPlaces.slice(0, teams).some((tp) => tp?.start || tp?.end);
+const hasTeamPlaces = (teams) => state.teamPlaces.slice(0, teams).some((tp) => tp?.start || tp?.end || tp?.mode);
+/** 班のルートの移動手段（班ごとに決めていなければ共通のもの）。 */
+const routeMode = (plan, r) => r.mode || plan.mode;
+/** 班ごとに出発地点・終点が違うルートか（移動手段だけを変えたときは違わない）。 */
+const placesVary = (plan) => plan.routes.some((r) => {
+  if (!r.start) return false;
+  const common = planEnd(plan);
+  return !samePoint(r.start, plan.start) || (r.end ? !samePoint(r.end, common) : common != null);
+});
+/** 班ごとに移動手段が違うルートか。 */
+const mixedModes = (plan) => new Set(plan.routes.map((r) => routeMode(plan, r))).size > 1;
 
 function persist() {
   const { list, start, end, teamPlaces, settings, plan, done, team } = state;
@@ -100,7 +110,7 @@ function go(next) {
 
 const byNumber = () => new Map((state.list?.boards || []).map((b) => [b.number, b]));
 const doneCount = () => (state.list?.boards || []).filter((b) => state.done[b.number]).length;
-const navUrl = (stops) => C.googleMapsNavUrl(stops, state.plan?.mode || state.settings.mode);
+const navUrl = (stops, mode = state.plan?.mode || state.settings.mode) => C.googleMapsNavUrl(stops, mode);
 const fmtLatLon = (p) => `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`;
 
 // ---------- 画面 ----------
@@ -192,17 +202,23 @@ function teamPlacesCard() {
       <div class="tp-head"><span class="dot"></span><b>${i + 1}班</b></div>
       <div class="tp-line">出発: ${startText}</div>
       <div class="tp-line">終点: ${endText}</div>
+      <label class="tp-line tp-mode">移動手段
+        <select name="teamMode" data-i="${i}">
+          <option value="">共通（${esc(MODES[settings.mode]?.label)}）</option>
+          ${Object.entries(MODES).map(([k, m]) => `<option value="${k}" ${tp.mode === k ? "selected" : ""}>${m.label}</option>`).join("")}
+        </select>
+      </label>
       <div class="row">
         <button class="btn outline small" data-act="editTeam" data-i="${i}" data-which="start">出発地点を変える</button>
         <button class="btn outline small" data-act="editTeam" data-i="${i}" data-which="end">終点を変える</button>
-        ${tp.start || tp.end ? `<button class="btn outline small" data-act="resetTeam" data-i="${i}">共通に戻す</button>` : ""}
+        ${tp.start || tp.end || tp.mode ? `<button class="btn outline small" data-act="resetTeam" data-i="${i}">共通に戻す</button>` : ""}
       </div>
       ${editor}
     </li>`;
   });
   return `
     <div class="teamplaces">
-      <p class="hint">班ごとに出発地点・終点を変えられます。変えない班は、上の出発地点・終わる場所と同じです。</p>
+      <p class="hint">班ごとに出発地点・終点・移動手段を変えられます。変えない班は、上の出発地点・終わる場所・移動手段と同じです。</p>
       <ul>${rows.join("")}</ul>
     </div>`;
 }
@@ -319,7 +335,7 @@ function renderPlan(v) {
   const boards = byNumber();
   const f = factorOf(plan);
   const how = plan.roads
-    ? `道に沿った距離（OpenStreetMap の道路データ${plan.mode === "driving" ? "。一方通行も守る" : ""}）で${plan.exact ? "、最短の順です。" : "、十分に短い順です（最短とは限りません）。"}`
+    ? `道に沿った距離（OpenStreetMap の道路データ${plan.routes.some((r) => routeMode(plan, r) === "driving") ? "。車は一方通行も守る" : ""}）で${plan.exact ? "、最短の順です。" : "、十分に短い順です（最短とは限りません）。"}`
     : `直線距離で${plan.exact ? "、最短の順です。" : "、十分に短い順です（最短とは限りません）。"}道のりは、直線距離の${ROAD_FACTOR}倍で見積もった目安です。`;
   const far = plan.unsnapped?.length
     ? `<p class="warn">道から400m以上離れていた掲示場（${plan.unsnapped.slice(0, 10).map(esc).join("、")}${plan.unsnapped.length > 10 ? " ほか" : ""}）は、直線距離×${ROAD_FACTOR}で見積もりました。緯度・経度を確かめてください。</p>`
@@ -328,21 +344,21 @@ function renderPlan(v) {
   v.innerHTML = `
     <section class="card">
       <h2>${k > 1 ? `${total}か所を${k}班に分けました` : `${total}か所を回るルート`}</h2>
-      <p>道のり ${formatRoadKm(dist, f)}（${MODES[plan.mode]?.label}・1か所${plan.workMin}分）${plan.routes.some((r) => r.start) ? "・班ごとの出発地点・終点" : plan.returnToStart ? "・出発地点に戻る" : plan.end ? `・${esc(plan.end.label || "終点")}で終わる` : "・最後の掲示場で終わる"}</p>
+      <p>道のり ${formatRoadKm(dist, f)}（${mixedModes(plan) ? "移動手段は班ごと" : MODES[routeMode(plan, plan.routes[0])]?.label}・1か所${plan.workMin}分）${placesVary(plan) ? "・班ごとの出発地点・終点" : plan.returnToStart ? "・出発地点に戻る" : plan.end ? `・${esc(plan.end.label || "終点")}で終わる` : "・最後の掲示場で終わる"}</p>
       ${gain > 0.001 ? `<p class="good">一覧の順に回るより <b>${Math.round(gain * 100)}%</b> 短くなりました（${formatRoadKm(plan.baseline, f)} → ${formatRoadKm(plan.routes[0].distance, f)}）</p>` : ""}
-      <p class="hint">${how}時間は、${MODES[plan.mode]?.label}${MODES[plan.mode]?.kmh}km/h と作業時間から出した目安です。</p>
+      <p class="hint">${how}時間は、${[...new Set(plan.routes.map((r) => routeMode(plan, r)))].map((m) => `${MODES[m]?.label}${MODES[m]?.kmh}km/h`).join("・")} と作業時間から出した目安です。</p>
       ${far}${farStart}
     </section>
     <ul class="teams">
       ${plan.routes.map((r, i) => {
         const left = remaining(r.numbers, state.done).length;
-        const min = estimateMinutes(r.distance, r.fromHere ? left : r.numbers.length, plan.mode, plan.workMin, f);
+        const min = estimateMinutes(r.distance, r.fromHere ? left : r.numbers.length, routeMode(plan, r), plan.workMin, f);
         const first = boards.get(r.numbers[0]);
         return `<li><button class="team" data-act="team" data-i="${i}" style="--c:${teamColor(i)}">
           <span class="dot"></span>
-          <span class="tmain"><b>${teamName(i, k)}</b>　${r.numbers.length}か所・${r.fromHere ? "残り" : ""}${formatRoadKm(r.distance, f)}・${formatDuration(min)}
+          <span class="tmain"><b>${teamName(i, k)}</b>${mixedModes(plan) ? `<span class="mode-tag">${MODES[routeMode(plan, r)]?.label}</span>` : ""}　${r.numbers.length}か所・${r.fromHere ? "残り" : ""}${formatRoadKm(r.distance, f)}・${formatDuration(min)}
             <small>${left ? `残り${left}か所` : "すべて貼り終えました"}${first ? `・最初は ${esc(first.number)} ${esc(first.name)}` : ""}</small>
-            ${r.start ? `<small>${esc(r.start.label || "出発地点")} → ${r.end ? (samePoint(r.start, r.end) ? "出発地点に戻る" : esc(r.end.label || "終点")) : "どこで終えてもよい"}</small>` : ""}</span>
+            ${placesVary(plan) && r.start ? `<small>${esc(r.start.label || "出発地点")} → ${r.end ? (samePoint(r.start, r.end) ? "出発地点に戻る" : esc(r.end.label || "終点")) : "どこで終えてもよい"}</small>` : ""}</span>
           <span class="chev" aria-hidden="true">›</span></button></li>`;
       }).join("")}
     </ul>
@@ -365,7 +381,8 @@ function renderTeam(v) {
   const pos = next ? list.indexOf(next) + 1 : 0;
   const batch = rest.slice(0, C.MAX_WAYPOINTS + 1);
   const f = factorOf(plan);
-  const min = estimateMinutes(r.distance, r.fromHere ? rest.length : r.numbers.length, plan.mode, plan.workMin, f);
+  const mode = routeMode(plan, r);
+  const min = estimateMinutes(r.distance, r.fromHere ? rest.length : r.numbers.length, mode, plan.workMin, f);
   const end = routeEnd(plan, r);
   v.innerHTML = `
     <section class="card next" style="--c:${teamColor(i)}">
@@ -374,12 +391,12 @@ function renderTeam(v) {
         <h2>${esc(next.number)}　${esc(next.name)}</h2>
         ${next.address ? `<p class="muted">${esc(next.address)}</p>` : ""}
         <div class="row">
-          <a class="btn" href="${esc(navUrl([next]))}" target="_blank" rel="noopener">Google マップで案内</a>
+          <a class="btn" href="${esc(navUrl([next], mode))}" target="_blank" rel="noopener">Google マップで案内</a>
           <button class="btn ok" data-act="done" data-n="${esc(next.number)}">貼った</button>
         </div>
-        ${batch.length > 1 ? `<a class="btn outline wide" href="${esc(navUrl(batch))}" target="_blank" rel="noopener">次の${batch.length}か所をまとめて案内</a>` : ""}`
+        ${batch.length > 1 ? `<a class="btn outline wide" href="${esc(navUrl(batch, mode))}" target="_blank" rel="noopener">次の${batch.length}か所をまとめて案内</a>` : ""}`
       : `<h2>この班はすべて貼り終えました</h2>
-        ${end ? `<a class="btn wide" href="${esc(navUrl([end]))}" target="_blank" rel="noopener">${samePoint(end, routeStart(plan, r)) ? "出発地点へ戻る" : "終点へ向かう"}案内</a>` : ""}`}
+        ${end ? `<a class="btn wide" href="${esc(navUrl([end], mode))}" target="_blank" rel="noopener">${samePoint(end, routeStart(plan, r)) ? "出発地点へ戻る" : "終点へ向かう"}案内</a>` : ""}`}
     </section>
     <p class="muted small">${list.length}か所・${r.fromHere ? "現在地から残り" : ""}${formatRoadKm(r.distance, f)}・${formatDuration(min)}・貼った ${list.length - rest.length}か所</p>
     <ol class="stops">
@@ -390,7 +407,7 @@ function renderTeam(v) {
             <span class="num" style="--c:${teamColor(i)}">${idx + 1}</span>
             <span class="sname"><b>${esc(b.number)}　${esc(b.name)}</b>${b.address ? `<small>${esc(b.address)}</small>` : ""}</span>
           </label>
-          <a class="go" href="${esc(navUrl([b]))}" target="_blank" rel="noopener" aria-label="${esc(b.name)} へ案内">案内</a>
+          <a class="go" href="${esc(navUrl([b], mode))}" target="_blank" rel="noopener" aria-label="${esc(b.name)} へ案内">案内</a>
         </li>`).join("")}
     </ol>
     <div class="row">
@@ -480,7 +497,7 @@ function updateMap() {
       const m = numbered
         ? L.marker([b.lat, b.lon], { icon: L.divIcon({ className: "", html: `<div class="pin${done ? " done" : ""}" style="--c:${teamColor(i)}">${idx + 1}</div>`, iconSize: [26, 26] }) })
         : L.circleMarker([b.lat, b.lon], { radius: 5, color: "#fff", weight: 1, fillColor: done ? "#999" : teamColor(i), fillOpacity: 0.95 });
-      m.bindPopup(`<b>${idx + 1}. ${esc(b.number)} ${esc(b.name)}</b>${b.address ? `<br>${esc(b.address)}` : ""}<br><a href="${esc(navUrl([b]))}" target="_blank" rel="noopener">Google マップで案内</a>`);
+      m.bindPopup(`<b>${idx + 1}. ${esc(b.number)} ${esc(b.name)}</b>${b.address ? `<br>${esc(b.address)}` : ""}<br><a href="${esc(navUrl([b], routeMode(plan, r)))}" target="_blank" rel="noopener">Google マップで案内</a>`);
       m.addTo(layer);
       pts.push([b.lat, b.lon]);
     });
@@ -554,7 +571,7 @@ async function solveAll() {
     const result = await solveWithFallback({
       start, stops, mode: settings.mode, roads: settings.roads,
       options: {
-        returnToStart: settings.returnToStart, teams, timeLimitMs: 2500,
+        returnToStart: settings.returnToStart, teams, timeLimitMs: 2500, workMin: settings.workMin,
         ...(settings.returnToStart ? {} : { end: endPoint }),
         ...(depots ? { teamDepots: depots } : {}),
         stopCost: stopCostMeters(settings.mode, settings.workMin, settings.roads ? 1 : ROAD_FACTOR),
@@ -570,7 +587,7 @@ async function solveAll() {
       startUnsnapped: !!result.startUnsnapped,
       routes: result.routes.map((r, i) => ({
         numbers: r.order.map((j) => stops[j].number), distance: r.distance, path: r.path || null,
-        ...(depots ? { start: depots[i].start, end: depots[i].end } : {}),
+        ...(depots ? { start: depots[i].start, end: depots[i].end, mode: depots[i].mode } : {}),
       })),
     };
     state.team = 0;
@@ -601,7 +618,7 @@ async function replanTeam() {
   setBusy(BUSY_TEXT);
   try {
     const end = routeEnd(plan, r);
-    const result = await solveWithFallback({ start: here, stops: rest, mode: plan.mode, roads: plan.roads, options: { end, timeLimitMs: 2500 } });
+    const result = await solveWithFallback({ start: here, stops: rest, mode: routeMode(plan, r), roads: plan.roads, options: { end, timeLimitMs: 2500 } });
     const route = result.routes[0];
     const order = route.order.map((i) => rest[i]);
     const doneOnes = r.numbers.filter((n) => state.done[n]);
@@ -694,7 +711,7 @@ function teamText(i) {
     title: teamName(i, plan.routes.length),
     boards: r.numbers.map((n) => boards.get(n)).filter(Boolean),
     distance: r.distance,
-    minutes: estimateMinutes(r.distance, r.fromHere ? remaining(r.numbers, state.done).length : r.numbers.length, plan.mode, plan.workMin, factorOf(plan)),
+    minutes: estimateMinutes(r.distance, r.fromHere ? remaining(r.numbers, state.done).length : r.numbers.length, routeMode(plan, r), plan.workMin, factorOf(plan)),
     done: state.done,
     factor: factorOf(plan),
   });
@@ -800,6 +817,13 @@ $("#view").addEventListener("change", (e) => {
   if (el.name === "mode") s.mode = el.value;
   else if (el.name === "workMin") s.workMin = Math.max(0, Math.min(60, Math.round(+el.value) || 0));
   else if (el.name === "teams") s.teams = Math.max(1, Math.min(MAX_TEAMS, Math.round(+el.value) || 1));
+  else if (el.name === "teamMode") {
+    const i = +el.dataset.i;
+    state.teamPlaces[i] = { ...state.teamPlaces[i], mode: el.value || undefined };
+    persist();
+    render();
+    return;
+  }
   else if (["returnToStart", "skipDone", "roads"].includes(el.name)) s[el.name] = el.checked;
   else if (el.name === "endFixed") s.endFixed = el.value === "1";
   else return;

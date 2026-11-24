@@ -408,8 +408,10 @@ function solveTeamOrder(d, s, e, stops, options) {
 /**
  * 班ごとに出発地点・終点が違うときの班分け（multi-depot）。
  * n: 掲示場の数。d(i, j): 点 i → j の距離（0..n-1 が掲示場、n 以降が班の出発地点・終点）。
- * depots: 班ごとの { s, e }（点の添字。e が null ならどこで終えてもよい）。
- * いちばん重い班（移動 + stopCost × 寄る数）ができるだけ軽くなるように分ける。
+ * depots: 班ごとの { s, e, d, scale }（s・e は点の添字。e が null ならどこで終えてもよい）。
+ *   d があれば、その班はその距離を使う（班ごとに移動手段が違うとき）。
+ *   scale は距離を重さ（時間など）に換える係数（既定 1）。
+ * いちばん重い班（scale × 移動 + stopCost × 寄る数）ができるだけ軽くなるように分ける。
  *  1. 今いちばん軽い班が、自分のルートにいちばん安く足せる掲示場を取る、を繰り返す
  *  2. 班ごとに順番を縮める
  *  3. いちばん重い班の掲示場を、ほかの班へ移すと重さの最大が下がるなら移す、を繰り返す
@@ -419,21 +421,25 @@ export function planMultiDepot(n, d, depots, options = {}) {
   const { stopCost = 0, timeLimitMs = 2500, now = () => Date.now() } = options;
   const k = depots.length;
   const deadline = now() + timeLimitMs;
+  const dist = depots.map((dep) => dep.d || d);
+  const scale = depots.map((dep) => dep.scale ?? 1);
   const travel = (t, order) => {
     if (!order.length) return 0;
     const { s, e } = depots[t];
-    let c = d(s, order[0]);
-    for (let i = 1; i < order.length; i++) c += d(order[i - 1], order[i]);
-    return c + (e == null ? 0 : d(order[order.length - 1], e));
+    const dd = dist[t];
+    let c = dd(s, order[0]);
+    for (let i = 1; i < order.length; i++) c += dd(order[i - 1], order[i]);
+    return c + (e == null ? 0 : dd(order[order.length - 1], e));
   };
-  const weight = (t, order) => travel(t, order) + stopCost * order.length;
+  const weight = (t, order) => scale[t] * travel(t, order) + stopCost * order.length;
   // 班 t の順 order の位置 p（0..length）に v を入れたときに増える距離
   const insertCost = (t, order, v, p) => {
     const { s, e } = depots[t];
+    const dd = dist[t];
     const prev = p === 0 ? s : order[p - 1];
     const next = p === order.length ? e : order[p];
-    if (next == null) return d(prev, v);
-    return d(prev, v) + d(v, next) - d(prev, next);
+    if (next == null) return dd(prev, v);
+    return dd(prev, v) + dd(v, next) - dd(prev, next);
   };
   const bestInsert = (t, order, v) => {
     let best = Infinity, pos = 0;
@@ -457,14 +463,15 @@ export function planMultiDepot(n, d, depots, options = {}) {
       if (!ins || b.cost < ins.cost) { ins = b; pick = v; }
     }
     routes[t].splice(ins.pos, 0, pick);
-    load[t] += ins.cost + stopCost;
+    load[t] += scale[t] * ins.cost + stopCost;
     left.delete(pick);
   }
 
   // 2. 班ごとに順番を縮める
   const teamOpts = (ms) => ({ ...options, timeLimitMs: ms });
   const share = Math.max(50, timeLimitMs / (3 * k));
-  for (let t = 0; t < k; t++) routes[t] = solveTeamOrder(d, depots[t].s, depots[t].e, routes[t], teamOpts(share));
+  const solveTeam = (t, ms) => solveTeamOrder(dist[t], depots[t].s, depots[t].e, routes[t], teamOpts(ms));
+  for (let t = 0; t < k; t++) routes[t] = solveTeam(t, share);
 
   // 3. いちばん重い班から、掲示場を移す
   for (let guard = 0; guard < 20 * n && now() < deadline; guard++) {
@@ -478,7 +485,7 @@ export function planMultiDepot(n, d, depots, options = {}) {
       for (let t = 0; t < k; t++) {
         if (t === L) continue;
         const b = bestInsert(t, routes[t], v);
-        const wt = w[t] + b.cost + stopCost;
+        const wt = w[t] + scale[t] * b.cost + stopCost;
         const worst = Math.max(wl, wt);
         if (worst < w[L] - EPS && (!best || worst < best.worst)) best = { worst, v, p, t, pos: b.pos };
       }
@@ -487,8 +494,8 @@ export function planMultiDepot(n, d, depots, options = {}) {
     routes[L].splice(best.p, 1);
     routes[best.t].splice(best.pos, 0, best.v);
     const ms = Math.max(30, Math.min(300, deadline - now()) / 2);
-    routes[L] = solveTeamOrder(d, depots[L].s, depots[L].e, routes[L], teamOpts(ms));
-    routes[best.t] = solveTeamOrder(d, depots[best.t].s, depots[best.t].e, routes[best.t], teamOpts(ms));
+    routes[L] = solveTeam(L, ms);
+    routes[best.t] = solveTeam(best.t, ms);
   }
   return { routes: routes.map((order, t) => ({ order, distance: travel(t, order) })), exact: false };
 }

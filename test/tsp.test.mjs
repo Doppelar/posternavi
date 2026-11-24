@@ -279,3 +279,32 @@ test("全班が同じ出発地点なら、いちばん重い班は、順番の�
   assert.ok(isPermutation(multi.routes.map((x) => x.order), 60));
   assert.ok(worst(multi.routes) < worst(split.routes) * 1.25, `${worst(multi.routes)} vs ${worst(split.routes)}`);
 });
+
+test("班ごとに速さが違うと、速い班が多く受け持ち、時間の釣り合いを取る", () => {
+  const stops = randomPoints(40, 101);
+  const pts = [...stops, start];
+  const d = pointsDist(pts);
+  // 0班は車（1m あたり 0.003分）、1班は徒歩（1m あたり 0.015分）
+  const depots = [{ s: 40, e: 40, scale: 0.003 }, { s: 40, e: 40, scale: 0.015 }];
+  const res = planMultiDepot(40, d, depots, { stopCost: 3, maxKicks: 50, timeLimitMs: 3000 });
+  assert.ok(isPermutation(res.routes.map((x) => x.order), 40));
+  assert.ok(res.routes[0].order.length > res.routes[1].order.length, "車の班のほうが多く回る");
+  const minutes = res.routes.map((r, t) => r.distance * depots[t].scale + 3 * r.order.length);
+  const all = planMultiDepot(40, d, [depots[0]], { stopCost: 3, maxKicks: 50 }).routes[0];
+  assert.ok(Math.max(...minutes) < all.distance * 0.003 + 3 * 40, "2班のほうが、車1班だけより早く終わる");
+});
+
+test("班ごとの距離（d）を使い、返す道のりもその距離で数える", () => {
+  const stops = randomPoints(12, 111);
+  const pts = [...stops, start];
+  const base = pointsDist(pts);
+  const double = (i, j) => base(i, j) * 2;
+  const res = planMultiDepot(12, base, [{ s: 12, e: 12 }, { s: 12, e: 12, d: double }], { timeLimitMs: 1000 });
+  const r = res.routes[1];
+  if (r.order.length) {
+    let len = double(12, r.order[0]);
+    for (let i = 1; i < r.order.length; i++) len += double(r.order[i - 1], r.order[i]);
+    len += double(r.order[r.order.length - 1], 12);
+    assert.ok(Math.abs(len - r.distance) < 1e-6);
+  }
+});

@@ -1,7 +1,7 @@
 // ルートの計算の入口（Web Worker からも、画面の中からも使う）。
 // 道に沿って計算するときは、小諸市の道路網を読み込み、道に沿った距離の表でルートを解き、
 // 地図に描く道に沿った線も作る。
-import { ROAD_FACTOR } from "./plan.js";
+import { MODES, ROAD_FACTOR } from "./plan.js";
 import { distanceMatrix, loadNetwork, routePath } from "./roads.js";
 import { distance, planMultiDepot, planRoutes } from "./tsp.js";
 
@@ -41,7 +41,10 @@ export async function solve(request) {
   return result;
 }
 
-/** 班ごとに出発地点・終点が違うとき。点の並びは [掲示場..., 班の出発地点・終点...]。 */
+/**
+ * 班ごとに出発地点・終点・移動手段が違うとき。点の並びは [掲示場..., 班の出発地点・終点...]。
+ * 班の重さは時間（分）でそろえる（移動 = 距離 ÷ 速さ、作業 = options.workMin × 寄る数）。
+ */
 async function solveTeams({ stops, options, roads, mode }) {
   const n = stops.length;
   const pts = [...stops];
@@ -51,26 +54,35 @@ async function solveTeams({ stops, options, roads, mode }) {
     if (!indexOf.has(key)) { indexOf.set(key, pts.length); pts.push(p); }
     return indexOf.get(key);
   };
-  const depots = options.teamDepots.map(({ start, end }) => ({ s: add(start), e: end ? add(end) : null }));
-  let d, net = null, snaps = null, unsnapped = [];
-  if (roads) {
-    net = await loadRoads();
-    const m = distanceMatrix(net, pts, mode, ROAD_FACTOR);
-    const M = pts.length;
-    d = (i, j) => (i === j ? 0 : m.matrix[i * M + j]);
-    snaps = m.snaps;
-    unsnapped = m.unsnapped;
-  } else {
-    d = (i, j) => distance(pts[i], pts[j]);
+  const teams = options.teamDepots.map((t) => ({ s: add(t.start), e: t.end ? add(t.end) : null, mode: t.mode || mode }));
+  const net = roads ? await loadRoads() : null;
+  // 移動手段ごとに、距離の表を1つずつ作る
+  const byMode = new Map();
+  for (const m of new Set(teams.map((t) => t.mode))) {
+    if (net) {
+      const r = distanceMatrix(net, pts, m, ROAD_FACTOR);
+      const M = pts.length;
+      byMode.set(m, { d: (i, j) => (i === j ? 0 : r.matrix[i * M + j]), snaps: r.snaps, unsnapped: r.unsnapped });
+    } else {
+      byMode.set(m, { d: (i, j) => distance(pts[i], pts[j]), snaps: null, unsnapped: [] });
+    }
   }
-  const result = planMultiDepot(n, d, depots, options);
+  const factor = net ? 1 : ROAD_FACTOR;
+  const depots = teams.map((t) => ({
+    s: t.s, e: t.e, d: byMode.get(t.mode).d,
+    scale: (60 / ((MODES[t.mode]?.kmh ?? MODES.driving.kmh) * 1000)) * factor, // 1m あたりの分
+  }));
+  const result = planMultiDepot(n, null, depots, { ...options, stopCost: options.workMin ?? 0 });
   result.routes.forEach((r, t) => {
+    r.mode = teams[t].mode;
     if (!net) return;
     const { s, e } = depots[t];
+    const { snaps } = byMode.get(teams[t].mode);
     const idx = [s, ...r.order, ...(e == null ? [] : [e])];
-    r.path = routePath(net, idx.map((i) => pts[i]), idx.map((i) => snaps[i]), mode);
+    r.path = routePath(net, idx.map((i) => pts[i]), idx.map((i) => snaps[i]), teams[t].mode);
   });
-  result.unsnapped = unsnapped.filter((i) => i < n);
-  result.startUnsnapped = depots.some(({ s }) => unsnapped.includes(s));
+  const unsnapped = new Set([...byMode.values()].flatMap((m) => m.unsnapped));
+  result.unsnapped = [...unsnapped].filter((i) => i < n).sort((a, b) => a - b);
+  result.startUnsnapped = depots.some(({ s }) => unsnapped.has(s));
   return result;
 }

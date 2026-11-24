@@ -160,3 +160,6 @@ input[type="search"] {
 .tp-line { font-size: 14px; }
 .tp-line small, .teamplaces .hint small { color: var(--muted); }
 .tp-edit { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.tp-mode { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.tp-mode select { width: auto; margin-top: 0; padding: 4px 8px; font-size: 15px; }
+.mode-tag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 6px; background: #EEF5FC; color: var(--brand); font-size: 12px; font-weight: 700; vertical-align: middle; }
