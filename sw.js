@@ -1,6 +1,6 @@
 // オフライン対応。アプリ本体は先に保存し、地図タイルは見た分だけ保存する。
 // 掲示場巡回 PWA（MIT License、Copyright (c) 2026 TOYOTAKA）の sw.js をもとにしている。
-const VERSION = "v3";
+const VERSION = "v4";
 const SHELL = `posternavi-shell-${VERSION}`;
 const TILES = "posternavi-tiles-v1";
 const MAX_TILES = 3000;

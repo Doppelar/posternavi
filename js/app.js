@@ -21,8 +21,9 @@ const state = {
   list: saved.list || null, // { name, boards: [{ number, name, address, lat, lon }] }
   start: saved.start || null, // { lat, lon, label }
   end: saved.end || null, // 終点（出発地点に戻らず、終点を決めるとき）
+  teamPlaces: saved.teamPlaces || [], // 班ごとに変えた出発地点・終点 [{ start, end }]（ないものは共通）
   settings: { ...DEFAULT_SETTINGS, ...saved.settings },
-  // { routes: [{ numbers, distance, path, fromHere }], start, end, mode, workMin, returnToStart, roads, exact, baseline, unsnapped }
+  // { routes: [{ numbers, distance, path, fromHere, start, end }], start, end, mode, workMin, returnToStart, roads, exact, baseline, unsnapped }
   plan: saved.plan || null,
   done: saved.done || {}, // 番号 → 貼った時刻
   team: saved.team || 0,
@@ -31,9 +32,10 @@ let view = state.plan ? "plan" : "setup";
 let importDraft = null; // { name, table, mapping }
 let importReport = null; // { count, issues, outsideJapan }
 let pickPoint = null;
-let pickTarget = "start"; // 地図で選ぶ地点（"start" か "end"）
+let pickTarget = "start"; // 地図で選ぶ地点（選ぶ対象。下の teamTarget を参照）
 let places = []; // 小諸市の場所の一覧（[名前, 種類, 緯度, 経度, よみ]）
-const results = { start: [], end: [] }; // 名前で探した結果
+const results = {}; // 名前で探した結果（選ぶ対象ごと）
+let editingTeam = null; // 出発地点・終点を変えている班 { i, which }
 let boundary = null; // 市の境界（[[lat, lon], ...] の輪の並び）
 
 /** 市の中か（境界を読めていないときは中として扱う）。 */
@@ -42,10 +44,39 @@ const inCity = (p) => !boundary || insidePolygon(p, boundary);
 const factorOf = (plan) => (plan.roads ? 1 : ROAD_FACTOR);
 /** ルートの終点（出発地点に戻るなら出発地点、どこで終えてもよいなら null）。 */
 const planEnd = (plan) => (plan.returnToStart ? plan.start : plan.end || null);
+/** 班のルートの出発地点と終点（班ごとに決めていなければ共通のもの。終点 null はどこで終えてもよい）。 */
+const routeStart = (plan, r) => r.start || plan.start;
+const routeEnd = (plan, r) => (r.start ? r.end : planEnd(plan));
+const samePoint = (a, b) => !!a && !!b && a.lat === b.lat && a.lon === b.lon;
+
+/** 選ぶ対象: "start"・"end"（共通）か、"team-<番号>-start"・"team-<番号>-end"（班ごと）。 */
+function teamTarget(target) {
+  const m = /^team-(\d+)-(start|end)$/.exec(target);
+  return m ? { i: +m[1], which: m[2] } : null;
+}
+function getPlace(target) {
+  const t = teamTarget(target);
+  return t ? state.teamPlaces[t.i]?.[t.which] || null : state[target];
+}
+function labelOf(target) {
+  const t = teamTarget(target);
+  const base = { start: "出発地点", end: "終点" };
+  return t ? `${t.i + 1}班の${base[t.which]}` : base[target];
+}
+
+/** 班 i の実際の出発地点と終点（共通の設定を当てはめたもの）。終点 null はどこで終えてもよい。 */
+function teamDepot(i) {
+  const tp = state.teamPlaces[i] || {};
+  const { settings } = state;
+  const start = tp.start || state.start;
+  const end = tp.end || (settings.returnToStart ? start : settings.endFixed ? state.end : null);
+  return { start, end };
+}
+const hasTeamPlaces = (teams) => state.teamPlaces.slice(0, teams).some((tp) => tp?.start || tp?.end);
 
 function persist() {
-  const { list, start, end, settings, plan, done, team } = state;
-  if (!save({ list, start, end, settings, plan, done, team })) toast("この端末に保存できませんでした。容量がいっぱいの可能性があります。");
+  const { list, start, end, teamPlaces, settings, plan, done, team } = state;
+  if (!save({ list, start, end, teamPlaces, settings, plan, done, team })) toast("この端末に保存できませんでした。容量がいっぱいの可能性があります。");
 }
 
 function toast(text) {
@@ -87,11 +118,9 @@ function render() {
   updateMap();
 }
 
-const TARGET_LABEL = { start: "出発地点", end: "終点" };
-
 /** 出発地点・終点を、名前・住所・地図・現在地・緯度経度で決める部品。 */
 function placePicker(target) {
-  const p = state[target], label = TARGET_LABEL[target];
+  const p = getPlace(target), label = labelOf(target);
   return `
       ${p ? `<p class="chosen"><b>${esc(p.label || label)}</b><br><span class="muted small">${fmtLatLon(p)}</span></p>` : `<p class="muted">まだ決めていません。</p>`}
       ${p && !inCity(p) ? `<p class="warn">${label}が小諸市の外です。道から遠いときは、${label}との距離を直線で見積もります。</p>` : ""}
@@ -114,7 +143,7 @@ function placePicker(target) {
 }
 
 function resultItems(target) {
-  return results[target].map((r, i) => `<li><button type="button" class="result" data-act="choose" data-target="${target}" data-i="${i}">
+  return (results[target] || []).map((r, i) => `<li><button type="button" class="result" data-act="choose" data-target="${target}" data-i="${i}">
     ${esc(r.name)}<small>${esc(r.kind)}</small></button></li>`).join("");
 }
 
@@ -142,6 +171,40 @@ async function searchAll(target, q) {
   } catch {
     showResults(target, local, "見つかりませんでした（住所の検索にはネットへの接続が必要です）。");
   }
+}
+
+/** 班ごとの出発地点・終点（変えていない班は共通のもの）。 */
+function teamPlacesCard() {
+  const { settings } = state;
+  const commonEnd = settings.returnToStart ? "出発地点に戻る" : settings.endFixed ? state.end?.label || "（終点が未定）" : "どこで終えてもよい";
+  const rows = Array.from({ length: settings.teams }, (_, i) => {
+    const tp = state.teamPlaces[i] || {};
+    const common = "<small>（共通）</small>";
+    const startText = tp.start ? esc(tp.start.label || "出発地点") : `${esc(state.start?.label || "未定")}${common}`;
+    const endText = tp.end ? esc(tp.end.label || "終点")
+      : tp.start && settings.returnToStart ? `この班の出発地点に戻る${common}` : `${esc(commonEnd)}${common}`;
+    const editing = editingTeam?.i === i ? editingTeam.which : null;
+    const editor = editing
+      ? `<div class="tp-edit">${placePicker(`team-${i}-${editing}`)}
+          <button class="btn outline small wide" data-act="closeTeam">閉じる</button></div>`
+      : "";
+    return `<li style="--c:${teamColor(i)}">
+      <div class="tp-head"><span class="dot"></span><b>${i + 1}班</b></div>
+      <div class="tp-line">出発: ${startText}</div>
+      <div class="tp-line">終点: ${endText}</div>
+      <div class="row">
+        <button class="btn outline small" data-act="editTeam" data-i="${i}" data-which="start">出発地点を変える</button>
+        <button class="btn outline small" data-act="editTeam" data-i="${i}" data-which="end">終点を変える</button>
+        ${tp.start || tp.end ? `<button class="btn outline small" data-act="resetTeam" data-i="${i}">共通に戻す</button>` : ""}
+      </div>
+      ${editor}
+    </li>`;
+  });
+  return `
+    <div class="teamplaces">
+      <p class="hint">班ごとに出発地点・終点を変えられます。変えない班は、上の出発地点・終わる場所と同じです。</p>
+      <ul>${rows.join("")}</ul>
+    </div>`;
 }
 
 function renderSetup(v) {
@@ -192,7 +255,12 @@ function renderSetup(v) {
         ${Object.entries(MODES).map(([k, m]) => `<label><input type="radio" name="mode" value="${k}" ${settings.mode === k ? "checked" : ""}><span>${m.label}</span></label>`).join("")}
       </div>
       <label class="field">1か所の作業時間<span><input type="number" name="workMin" min="0" max="60" step="1" value="${settings.workMin}"> 分</span></label>
-      <label class="field">何人（何班）で分けるか<span><input type="number" name="teams" min="1" max="${MAX_TEAMS}" step="1" value="${settings.teams}"> 班</span></label>
+      <label class="field">何班で分けるか
+        <select name="teams" class="teams-select">
+          ${Array.from({ length: MAX_TEAMS }, (_, i) => `<option value="${i + 1}" ${settings.teams === i + 1 ? "selected" : ""}>${i === 0 ? "分けない（1班）" : `${i + 1}班`}</option>`).join("")}
+        </select>
+      </label>
+      ${settings.teams > 1 ? teamPlacesCard() : ""}
       <label class="check"><input type="checkbox" name="roads" ${settings.roads ? "checked" : ""}> 道に沿った距離で計算する（車は一方通行も守る）</label>
       ${dc ? `<label class="check"><input type="checkbox" name="skipDone" ${settings.skipDone ? "checked" : ""}> 貼り終えた${dc}か所は除く</label>` : ""}
     </section>
@@ -260,7 +328,7 @@ function renderPlan(v) {
   v.innerHTML = `
     <section class="card">
       <h2>${k > 1 ? `${total}か所を${k}班に分けました` : `${total}か所を回るルート`}</h2>
-      <p>道のり ${formatRoadKm(dist, f)}（${MODES[plan.mode]?.label}・1か所${plan.workMin}分）${plan.returnToStart ? "・出発地点に戻る" : plan.end ? `・${esc(plan.end.label || "終点")}で終わる` : "・最後の掲示場で終わる"}</p>
+      <p>道のり ${formatRoadKm(dist, f)}（${MODES[plan.mode]?.label}・1か所${plan.workMin}分）${plan.routes.some((r) => r.start) ? "・班ごとの出発地点・終点" : plan.returnToStart ? "・出発地点に戻る" : plan.end ? `・${esc(plan.end.label || "終点")}で終わる` : "・最後の掲示場で終わる"}</p>
       ${gain > 0.001 ? `<p class="good">一覧の順に回るより <b>${Math.round(gain * 100)}%</b> 短くなりました（${formatRoadKm(plan.baseline, f)} → ${formatRoadKm(plan.routes[0].distance, f)}）</p>` : ""}
       <p class="hint">${how}時間は、${MODES[plan.mode]?.label}${MODES[plan.mode]?.kmh}km/h と作業時間から出した目安です。</p>
       ${far}${farStart}
@@ -273,7 +341,8 @@ function renderPlan(v) {
         return `<li><button class="team" data-act="team" data-i="${i}" style="--c:${teamColor(i)}">
           <span class="dot"></span>
           <span class="tmain"><b>${teamName(i, k)}</b>　${r.numbers.length}か所・${r.fromHere ? "残り" : ""}${formatRoadKm(r.distance, f)}・${formatDuration(min)}
-            <small>${left ? `残り${left}か所` : "すべて貼り終えました"}${first ? `・最初は ${esc(first.number)} ${esc(first.name)}` : ""}</small></span>
+            <small>${left ? `残り${left}か所` : "すべて貼り終えました"}${first ? `・最初は ${esc(first.number)} ${esc(first.name)}` : ""}</small>
+            ${r.start ? `<small>${esc(r.start.label || "出発地点")} → ${r.end ? (samePoint(r.start, r.end) ? "出発地点に戻る" : esc(r.end.label || "終点")) : "どこで終えてもよい"}</small>` : ""}</span>
           <span class="chev" aria-hidden="true">›</span></button></li>`;
       }).join("")}
     </ul>
@@ -297,6 +366,7 @@ function renderTeam(v) {
   const batch = rest.slice(0, C.MAX_WAYPOINTS + 1);
   const f = factorOf(plan);
   const min = estimateMinutes(r.distance, r.fromHere ? rest.length : r.numbers.length, plan.mode, plan.workMin, f);
+  const end = routeEnd(plan, r);
   v.innerHTML = `
     <section class="card next" style="--c:${teamColor(i)}">
       ${next ? `
@@ -309,7 +379,7 @@ function renderTeam(v) {
         </div>
         ${batch.length > 1 ? `<a class="btn outline wide" href="${esc(navUrl(batch))}" target="_blank" rel="noopener">次の${batch.length}か所をまとめて案内</a>` : ""}`
       : `<h2>この班はすべて貼り終えました</h2>
-        ${planEnd(plan) ? `<a class="btn wide" href="${esc(navUrl([planEnd(plan)]))}" target="_blank" rel="noopener">${plan.returnToStart ? "出発地点へ戻る" : "終点へ向かう"}案内</a>` : ""}`}
+        ${end ? `<a class="btn wide" href="${esc(navUrl([end]))}" target="_blank" rel="noopener">${samePoint(end, routeStart(plan, r)) ? "出発地点へ戻る" : "終点へ向かう"}案内</a>` : ""}`}
     </section>
     <p class="muted small">${list.length}か所・${r.fromHere ? "現在地から残り" : ""}${formatRoadKm(r.distance, f)}・${formatDuration(min)}・貼った ${list.length - rest.length}か所</p>
     <ol class="stops">
@@ -331,7 +401,7 @@ function renderTeam(v) {
 }
 
 function renderPick(v) {
-  const label = TARGET_LABEL[pickTarget];
+  const label = labelOf(pickTarget);
   setHeader(`${label}を選ぶ`, "setup");
   v.innerHTML = `
     <section class="card pickpanel">
@@ -382,26 +452,27 @@ function updateMap() {
   const boards = byNumber();
   if (view === "pick") {
     // 選んでいないほうの地点も、目印として出す
-    const other = pickTarget === "start" ? state.end : state.start;
-    if (other) L.marker([other.lat, other.lon], { icon: pickTarget === "start" ? endIcon() : startIcon(), opacity: 0.6, interactive: false }).addTo(layer);
-    if (pickPoint) L.marker([pickPoint.lat, pickPoint.lon], { icon: pickTarget === "start" ? startIcon() : endIcon() }).addTo(layer);
+    const isStart = pickTarget.endsWith("start");
+    const other = isStart ? state.end : state.start;
+    if (other) L.marker([other.lat, other.lon], { icon: isStart ? endIcon() : startIcon(), opacity: 0.6, interactive: false }).addTo(layer);
+    if (pickPoint) L.marker([pickPoint.lat, pickPoint.lon], { icon: isStart ? startIcon() : endIcon() }).addTo(layer);
     for (const b of state.list?.boards || []) {
       L.circleMarker([b.lat, b.lon], { radius: 4, color: "#555", weight: 1, fillOpacity: 0.6, interactive: false }).addTo(layer);
     }
-    const around = pickPoint || state[pickTarget] || state.start;
+    const around = pickPoint || getPlace(pickTarget) || state.start;
     map.invalidateSize();
     if (around) map.setView([around.lat, around.lon], Math.max(map.getZoom() || 0, 15));
     else if (state.list?.boards.length) map.fitBounds(state.list.boards.map((b) => [b.lat, b.lon]), { padding: [20, 20] });
     else map.setView(CITY.center, CITY.zoom);
     return;
   }
-  const end = planEnd(plan);
   const routes = view === "team" ? [state.team] : plan.routes.map((_, i) => i);
   for (const i of routes) {
     const r = plan.routes[i];
     if (!r) continue;
     const list = r.numbers.map((n) => boards.get(n)).filter(Boolean);
-    const line = r.path || [plan.start, ...list, ...(end ? [end] : [])].map((p) => [p.lat, p.lon]);
+    const end = routeEnd(plan, r);
+    const line = r.path || [routeStart(plan, r), ...list, ...(end ? [end] : [])].map((p) => [p.lat, p.lon]);
     L.polyline(line, { color: teamColor(i), weight: plan.roads ? 4 : 3, opacity: 0.75 }).addTo(layer);
     const numbered = view === "team" && list.length <= 400;
     list.forEach((b, idx) => {
@@ -414,11 +485,21 @@ function updateMap() {
       pts.push([b.lat, b.lon]);
     });
   }
-  L.marker([plan.start.lat, plan.start.lon], { icon: startIcon(), zIndexOffset: 1000 }).addTo(layer);
-  pts.push([plan.start.lat, plan.start.lon]);
-  if (plan.end) {
-    L.marker([plan.end.lat, plan.end.lon], { icon: endIcon(), zIndexOffset: 900 }).addTo(layer);
-    pts.push([plan.end.lat, plan.end.lon]);
+  // 出発地点・終点の印（同じ地点は1つだけ）
+  const marked = new Set();
+  const mark = (p, icon, z) => {
+    const key = `${p.lat},${p.lon},${z}`;
+    if (marked.has(key)) return;
+    marked.add(key);
+    L.marker([p.lat, p.lon], { icon, zIndexOffset: z }).addTo(layer);
+    pts.push([p.lat, p.lon]);
+  };
+  for (const i of routes) {
+    const r = plan.routes[i];
+    if (!r) continue;
+    const start = routeStart(plan, r), end = routeEnd(plan, r);
+    mark(start, startIcon(), 1000);
+    if (end && !samePoint(start, end)) mark(end, endIcon(), 900);
   }
   map.invalidateSize();
   map.fitBounds(pts, { padding: [24, 24], maxZoom: 17 });
@@ -466,6 +547,8 @@ async function solveAll() {
   const stops = settings.skipDone ? list.boards.filter((b) => !state.done[b.number]) : list.boards;
   if (!stops.length) return toast("回る掲示場がありません（すべて貼り終えています）。");
   const teams = Math.max(1, Math.min(MAX_TEAMS, Math.floor(settings.teams) || 1));
+  // 班ごとに出発地点・終点を変えたときは、班ごとの地点で分ける
+  const depots = teams > 1 && hasTeamPlaces(teams) ? Array.from({ length: teams }, (_, i) => teamDepot(i)) : null;
   setBusy(settings.roads ? "道路データを読み込んで、ルートを計算しています…" : BUSY_TEXT);
   try {
     const result = await solveWithFallback({
@@ -473,6 +556,7 @@ async function solveAll() {
       options: {
         returnToStart: settings.returnToStart, teams, timeLimitMs: 2500,
         ...(settings.returnToStart ? {} : { end: endPoint }),
+        ...(depots ? { teamDepots: depots } : {}),
         stopCost: stopCostMeters(settings.mode, settings.workMin, settings.roads ? 1 : ROAD_FACTOR),
       },
     });
@@ -484,7 +568,10 @@ async function solveAll() {
       baseline: result.routes.length === 1 ? result.listOrderDistance : null,
       unsnapped: (result.unsnapped || []).map((i) => stops[i].number),
       startUnsnapped: !!result.startUnsnapped,
-      routes: result.routes.map((r) => ({ numbers: r.order.map((i) => stops[i].number), distance: r.distance, path: r.path || null })),
+      routes: result.routes.map((r, i) => ({
+        numbers: r.order.map((j) => stops[j].number), distance: r.distance, path: r.path || null,
+        ...(depots ? { start: depots[i].start, end: depots[i].end } : {}),
+      })),
     };
     state.team = 0;
     persist();
@@ -513,7 +600,7 @@ async function replanTeam() {
   }
   setBusy(BUSY_TEXT);
   try {
-    const end = planEnd(plan);
+    const end = routeEnd(plan, r);
     const result = await solveWithFallback({ start: here, stops: rest, mode: plan.mode, roads: plan.roads, options: { end, timeLimitMs: 2500 } });
     const route = result.routes[0];
     const order = route.order.map((i) => rest[i]);
@@ -627,7 +714,11 @@ async function shareText(text) {
 
 // ---------- 操作 ----------
 function setPlace(target, p) {
-  state[target] = p;
+  const t = teamTarget(target);
+  if (t) {
+    state.teamPlaces[t.i] = { ...state.teamPlaces[t.i], [t.which]: p };
+    editingTeam = null;
+  } else state[target] = p;
   results[target] = [];
   persist();
 }
@@ -643,7 +734,7 @@ const actions = {
   sample: applySample,
   pick: (el) => {
     pickTarget = el.dataset.target;
-    const p = state[pickTarget];
+    const p = getPlace(pickTarget);
     pickPoint = p ? { lat: p.lat, lon: p.lon } : null;
     go("pick");
   },
@@ -654,8 +745,11 @@ const actions = {
       render();
     } catch (err) { toast(err.message); }
   },
+  editTeam: (el) => { editingTeam = { i: +el.dataset.i, which: el.dataset.which }; render(); },
+  closeTeam: () => { editingTeam = null; render(); },
+  resetTeam: (el) => { state.teamPlaces[+el.dataset.i] = {}; editingTeam = null; persist(); render(); },
   choose: (el) => {
-    const r = results[el.dataset.target][+el.dataset.i];
+    const r = results[el.dataset.target]?.[+el.dataset.i];
     if (!r) return;
     setPlace(el.dataset.target, { lat: r.lat, lon: r.lon, label: r.name });
     render();
@@ -710,7 +804,7 @@ $("#view").addEventListener("change", (e) => {
   else if (el.name === "endFixed") s.endFixed = el.value === "1";
   else return;
   persist();
-  if (el.name === "returnToStart" || el.name === "endFixed") render(); // 終点の入力を出し入れする
+  if (["returnToStart", "endFixed", "teams"].includes(el.name)) render(); // 終点や班ごとの入力を出し入れする
 });
 
 $("#view").addEventListener("submit", (e) => {

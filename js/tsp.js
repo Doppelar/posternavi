@@ -57,13 +57,17 @@ function buildProblem(start, stops, endKind, endPoint, matrix) {
     Dd[i * N + n + 1] = toEnd(i);
     Dd[(n + 1) * N + i] = Dd[i * N + n + 1];
   }
-  if (!matrix) return { N, D: Dd, Dd, s: 0, e: n + 1 };
+  return { N, D: matrix ? symmetrize(Dd, N, n) : Dd, Dd, s: 0, e: n + 1 };
+}
+
+/** 探索用に向きをそろえた表（中の点どうしは往復の平均、出発地との辺は出ていく向きの距離）。 */
+function symmetrize(Dd, N, n) {
   const D = Dd.slice();
   for (let i = 1; i <= n; i++) {
     for (let j = i + 1; j <= n; j++) D[i * N + j] = D[j * N + i] = (Dd[i * N + j] + Dd[j * N + i]) / 2;
   }
-  for (let j = 1; j <= n; j++) D[j * N] = Dd[j]; // 出発地との辺は、出ていく向きの距離にそろえる
-  return { N, D, Dd, s: 0, e: n + 1 };
+  for (let j = 1; j <= n; j++) D[j * N] = Dd[j];
+  return D;
 }
 
 /** 道順（ノードの並び）の長さ。 */
@@ -376,4 +380,115 @@ export function routeDistance(start, stops, end = start) {
   let t = distance(start, stops[0]);
   for (let i = 1; i < stops.length; i++) t += distance(stops[i - 1], stops[i]);
   return end ? t + distance(stops[stops.length - 1], end) : t;
+}
+
+/**
+ * 点 s から stops（添字の並び）をすべて回って e で終わる順（e が null ならどこで終えてもよい）。
+ * d(i, j) は点 i → j の距離。返り値は stops の添字の並び。
+ */
+function solveTeamOrder(d, s, e, stops, options) {
+  const m = stops.length;
+  if (!m) return [];
+  const N = m + 2;
+  const ids = [s, ...stops];
+  const Dd = new Float64Array(N * N);
+  for (let i = 0; i <= m; i++) {
+    for (let j = 0; j <= m; j++) if (i !== j) Dd[i * N + j] = d(ids[i], ids[j]);
+    Dd[i * N + m + 1] = Dd[(m + 1) * N + i] = e == null ? 0 : d(ids[i], e);
+  }
+  const interior = Array.from({ length: m }, (_, i) => i + 1);
+  let { order } = solvePath(symmetrize(Dd, N, m), N, 0, m + 1, interior, options, Dd);
+  if (e === s) { // 出発地点に戻るときは、逆回りのほうが短ければそちら（一方通行があると違う）
+    const rev = [...order].reverse();
+    if (pathLength(Dd, N, [0, ...rev, m + 1]) < pathLength(Dd, N, [0, ...order, m + 1]) - EPS) order = rev;
+  }
+  return order.map((v) => ids[v]);
+}
+
+/**
+ * 班ごとに出発地点・終点が違うときの班分け（multi-depot）。
+ * n: 掲示場の数。d(i, j): 点 i → j の距離（0..n-1 が掲示場、n 以降が班の出発地点・終点）。
+ * depots: 班ごとの { s, e }（点の添字。e が null ならどこで終えてもよい）。
+ * いちばん重い班（移動 + stopCost × 寄る数）ができるだけ軽くなるように分ける。
+ *  1. 今いちばん軽い班が、自分のルートにいちばん安く足せる掲示場を取る、を繰り返す
+ *  2. 班ごとに順番を縮める
+ *  3. いちばん重い班の掲示場を、ほかの班へ移すと重さの最大が下がるなら移す、を繰り返す
+ * 返り値: { routes: [{ order: 掲示場の添字の並び, distance }], exact: false }
+ */
+export function planMultiDepot(n, d, depots, options = {}) {
+  const { stopCost = 0, timeLimitMs = 2500, now = () => Date.now() } = options;
+  const k = depots.length;
+  const deadline = now() + timeLimitMs;
+  const travel = (t, order) => {
+    if (!order.length) return 0;
+    const { s, e } = depots[t];
+    let c = d(s, order[0]);
+    for (let i = 1; i < order.length; i++) c += d(order[i - 1], order[i]);
+    return c + (e == null ? 0 : d(order[order.length - 1], e));
+  };
+  const weight = (t, order) => travel(t, order) + stopCost * order.length;
+  // 班 t の順 order の位置 p（0..length）に v を入れたときに増える距離
+  const insertCost = (t, order, v, p) => {
+    const { s, e } = depots[t];
+    const prev = p === 0 ? s : order[p - 1];
+    const next = p === order.length ? e : order[p];
+    if (next == null) return d(prev, v);
+    return d(prev, v) + d(v, next) - d(prev, next);
+  };
+  const bestInsert = (t, order, v) => {
+    let best = Infinity, pos = 0;
+    for (let p = 0; p <= order.length; p++) {
+      const c = insertCost(t, order, v, p);
+      if (c < best) { best = c; pos = p; }
+    }
+    return { cost: best, pos };
+  };
+
+  // 1. いちばん軽い班から、安く足せる掲示場を取る
+  const routes = depots.map(() => []);
+  const load = new Array(k).fill(0);
+  const left = new Set(Array.from({ length: n }, (_, i) => i));
+  while (left.size) {
+    let t = 0;
+    for (let i = 1; i < k; i++) if (load[i] < load[t]) t = i;
+    let pick = -1, ins = null;
+    for (const v of left) {
+      const b = bestInsert(t, routes[t], v);
+      if (!ins || b.cost < ins.cost) { ins = b; pick = v; }
+    }
+    routes[t].splice(ins.pos, 0, pick);
+    load[t] += ins.cost + stopCost;
+    left.delete(pick);
+  }
+
+  // 2. 班ごとに順番を縮める
+  const teamOpts = (ms) => ({ ...options, timeLimitMs: ms });
+  const share = Math.max(50, timeLimitMs / (3 * k));
+  for (let t = 0; t < k; t++) routes[t] = solveTeamOrder(d, depots[t].s, depots[t].e, routes[t], teamOpts(share));
+
+  // 3. いちばん重い班から、掲示場を移す
+  for (let guard = 0; guard < 20 * n && now() < deadline; guard++) {
+    const w = routes.map((r, t) => weight(t, r));
+    let L = 0;
+    for (let t = 1; t < k; t++) if (w[t] > w[L]) L = t;
+    let best = null;
+    routes[L].forEach((v, p) => {
+      const without = routes[L].filter((_, q) => q !== p);
+      const wl = weight(L, without);
+      for (let t = 0; t < k; t++) {
+        if (t === L) continue;
+        const b = bestInsert(t, routes[t], v);
+        const wt = w[t] + b.cost + stopCost;
+        const worst = Math.max(wl, wt);
+        if (worst < w[L] - EPS && (!best || worst < best.worst)) best = { worst, v, p, t, pos: b.pos };
+      }
+    });
+    if (!best) break;
+    routes[L].splice(best.p, 1);
+    routes[best.t].splice(best.pos, 0, best.v);
+    const ms = Math.max(30, Math.min(300, deadline - now()) / 2);
+    routes[L] = solveTeamOrder(d, depots[L].s, depots[L].e, routes[L], teamOpts(ms));
+    routes[best.t] = solveTeamOrder(d, depots[best.t].s, depots[best.t].e, routes[best.t], teamOpts(ms));
+  }
+  return { routes: routes.map((order, t) => ({ order, distance: travel(t, order) })), exact: false };
 }

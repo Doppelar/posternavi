@@ -1,7 +1,7 @@
 // node --test test/ で実行する。点はすべて乱数で作った架空のもの。
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { distance, planRoutes, rng, routeDistance } from "../js/tsp.js";
+import { distance, planMultiDepot, planRoutes, rng, routeDistance } from "../js/tsp.js";
 
 const randomPoints = (n, seed) => {
   const r = rng(seed);
@@ -235,4 +235,47 @@ test("終点を別の地点にするときは、表の最後（n+1）を終点�
   };
   perm([1, 2, 3, 4, 5, 6], 0, 0);
   assert.ok(Math.abs(routes[0].distance - best) < 1e-6);
+});
+
+/** 掲示場（0..n-1）と出発地点・終点（n 以降）をまとめた点の並びと、直線距離の関数。 */
+const pointsDist = (pts) => (i, j) => distance(pts[i], pts[j]);
+
+test("班ごとに出発地点が違うと、それぞれ近い固まりを受け持つ", () => {
+  const west = { lat: 36.45, lon: 139.0 }, east = { lat: 36.45, lon: 139.2 };
+  const r = rng(5);
+  const near = (c) => ({ lat: c.lat + (r() - 0.5) * 0.02, lon: c.lon + (r() - 0.5) * 0.02 });
+  const stops = [...Array(10)].map(() => near(west)).concat([...Array(10)].map(() => near(east)));
+  const pts = [...stops, west, east];
+  const res = planMultiDepot(20, pointsDist(pts), [{ s: 20, e: 20 }, { s: 21, e: 21 }], { maxKicks: 50 });
+  assert.ok(isPermutation(res.routes.map((x) => x.order), 20));
+  assert.ok(res.routes[0].order.every((i) => i < 10), "西の班は西の10か所");
+  assert.ok(res.routes[1].order.every((i) => i >= 10), "東の班は東の10か所");
+});
+
+test("班ごとの終点（どこで終えてもよい・別の地点）を守り、返す道のりは並びどおり", () => {
+  const stops = randomPoints(30, 81);
+  const a = { lat: 36.40, lon: 139.0 }, b = { lat: 36.50, lon: 139.1 }, c = { lat: 36.45, lon: 139.05 };
+  const pts = [...stops, a, b, c];
+  const d = pointsDist(pts);
+  const depots = [{ s: 30, e: 31 }, { s: 32, e: null }, { s: 30, e: 30 }];
+  const res = planMultiDepot(30, d, depots, { maxKicks: 50, timeLimitMs: 2000 });
+  assert.ok(isPermutation(res.routes.map((x) => x.order), 30));
+  res.routes.forEach((route, t) => {
+    if (!route.order.length) return;
+    const { s, e } = depots[t];
+    let len = d(s, route.order[0]);
+    for (let i = 1; i < route.order.length; i++) len += d(route.order[i - 1], route.order[i]);
+    if (e != null) len += d(route.order[route.order.length - 1], e);
+    assert.ok(Math.abs(len - route.distance) < 1e-6);
+  });
+});
+
+test("全班が同じ出発地点なら、いちばん重い班は、順番のまま切り分ける方法と大きく変わらない", () => {
+  const stops = randomPoints(60, 91);
+  const pts = [...stops, start];
+  const multi = planMultiDepot(60, pointsDist(pts), [0, 1, 2].map(() => ({ s: 60, e: 60 })), { maxKicks: 100, timeLimitMs: 3000 });
+  const split = planRoutes(start, stops, { teams: 3, maxKicks: 100 });
+  const worst = (rs) => Math.max(...rs.map((x) => x.distance));
+  assert.ok(isPermutation(multi.routes.map((x) => x.order), 60));
+  assert.ok(worst(multi.routes) < worst(split.routes) * 1.25, `${worst(multi.routes)} vs ${worst(split.routes)}`);
 });

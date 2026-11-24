@@ -3,7 +3,7 @@
 // 地図に描く道に沿った線も作る。
 import { ROAD_FACTOR } from "./plan.js";
 import { distanceMatrix, loadNetwork, routePath } from "./roads.js";
-import { planRoutes } from "./tsp.js";
+import { distance, planMultiDepot, planRoutes } from "./tsp.js";
 
 let network = null;
 function loadRoads() {
@@ -17,7 +17,14 @@ function loadRoads() {
   return network;
 }
 
-export async function solve({ start, stops, options, roads, mode }) {
+/**
+ * request: { start, stops, options, roads, mode }
+ * options.teamDepots（[{ start, end }]、end が null ならどこで終えてもよい）があれば、
+ * 班ごとに出発地点・終点を変えて分ける。
+ */
+export async function solve(request) {
+  if (request.options?.teamDepots) return solveTeams(request);
+  const { start, stops, options, roads, mode } = request;
   if (!roads) return planRoutes(start, stops, options);
   const net = await loadRoads();
   const pts = [start, ...stops, ...(options.end ? [options.end] : [])];
@@ -31,5 +38,39 @@ export async function solve({ start, stops, options, roads, mode }) {
   }
   result.unsnapped = unsnapped.filter((i) => i >= 1 && i <= stops.length).map((i) => i - 1);
   result.startUnsnapped = unsnapped.includes(0);
+  return result;
+}
+
+/** 班ごとに出発地点・終点が違うとき。点の並びは [掲示場..., 班の出発地点・終点...]。 */
+async function solveTeams({ stops, options, roads, mode }) {
+  const n = stops.length;
+  const pts = [...stops];
+  const indexOf = new Map(); // 同じ地点は1つの点にまとめる
+  const add = (p) => {
+    const key = `${p.lat},${p.lon}`;
+    if (!indexOf.has(key)) { indexOf.set(key, pts.length); pts.push(p); }
+    return indexOf.get(key);
+  };
+  const depots = options.teamDepots.map(({ start, end }) => ({ s: add(start), e: end ? add(end) : null }));
+  let d, net = null, snaps = null, unsnapped = [];
+  if (roads) {
+    net = await loadRoads();
+    const m = distanceMatrix(net, pts, mode, ROAD_FACTOR);
+    const M = pts.length;
+    d = (i, j) => (i === j ? 0 : m.matrix[i * M + j]);
+    snaps = m.snaps;
+    unsnapped = m.unsnapped;
+  } else {
+    d = (i, j) => distance(pts[i], pts[j]);
+  }
+  const result = planMultiDepot(n, d, depots, options);
+  result.routes.forEach((r, t) => {
+    if (!net) return;
+    const { s, e } = depots[t];
+    const idx = [s, ...r.order, ...(e == null ? [] : [e])];
+    r.path = routePath(net, idx.map((i) => pts[i]), idx.map((i) => snaps[i]), mode);
+  });
+  result.unsnapped = unsnapped.filter((i) => i < n);
+  result.startUnsnapped = depots.some(({ s }) => unsnapped.includes(s));
   return result;
 }
