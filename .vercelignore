@@ -1,0 +1,9 @@
+test/
+tools/
+README.md
+LICENSE
+package.json
+.github/
+.env
+.env.*
+.vercel

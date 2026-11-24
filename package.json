@@ -1,0 +1,9 @@
+{
+  "name": "posternavi",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "start": "npx --yes http-server@14 -p 8782 -a 127.0.0.1 -c-1 ."
+  }
+}
