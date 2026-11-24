@@ -161,3 +161,78 @@ test("同じ場所に重なった掲示場があっても全部回る", () => {
   const { routes } = planRoutes(start, stops, { maxKicks: 100 });
   assert.ok(isPermutation([routes[0].order], 20));
 });
+
+/** 距離の表（行 → 列）で、すべての並びを試して最短を求める。 */
+function bruteForceMatrix(M, n, kind) {
+  let best = Infinity;
+  const used = new Array(n + 1).fill(false);
+  const walk = (cur, len, count) => {
+    if (count === n) {
+      best = Math.min(best, len + (kind === "start" ? M[cur * (n + 1)] : 0));
+      return;
+    }
+    for (let i = 1; i <= n; i++) {
+      if (used[i]) continue;
+      used[i] = true;
+      walk(i, len + M[cur * (n + 1) + i], count + 1);
+      used[i] = false;
+    }
+  };
+  walk(0, 0, 0);
+  return best;
+}
+
+/** 直線距離に、向きによって違う遠回りを足した表（一方通行のかわり）。 */
+function asymmetricMatrix(points, seed) {
+  const r = rng(seed);
+  const M = points.length;
+  const m = new Float64Array(M * M);
+  for (let i = 0; i < M; i++) for (let j = 0; j < M; j++) {
+    if (i !== j) m[i * M + j] = distance(points[i], points[j]) * (1.1 + r() * 0.8);
+  }
+  return m;
+}
+
+test("向きで違う距離の表でも、8か所までは総当たりと同じ最短", () => {
+  for (let seed = 1; seed <= 5; seed++) {
+    const stops = randomPoints(4 + seed % 4, seed + 50);
+    const matrix = asymmetricMatrix([start, ...stops], seed);
+    for (const returnToStart of [true, false]) {
+      const { routes } = planRoutes(start, stops, { matrix, returnToStart });
+      const opt = bruteForceMatrix(matrix, stops.length, returnToStart ? "start" : "free");
+      assert.ok(Math.abs(routes[0].distance - opt) < 1e-6, `seed ${seed}: ${routes[0].distance} vs ${opt}`);
+    }
+  }
+});
+
+test("距離の表を使うと、返す道のりも一覧の順の道のりも表の値で数える", () => {
+  const stops = randomPoints(40, 61);
+  const matrix = asymmetricMatrix([start, ...stops], 7);
+  const res = planRoutes(start, stops, { matrix, maxKicks: 200 });
+  const M = stops.length + 1;
+  const len = (order) => {
+    let t = matrix[order[0] + 1], prev = order[0] + 1;
+    for (const i of order.slice(1)) { t += matrix[prev * M + i + 1]; prev = i + 1; }
+    return t + matrix[prev * M];
+  };
+  assert.ok(isPermutation([res.routes[0].order], 40));
+  assert.ok(Math.abs(res.routes[0].distance - len(res.routes[0].order)) < 1e-6);
+  assert.ok(Math.abs(res.listOrderDistance - len([...Array(40).keys()])) < 1e-6);
+  assert.ok(res.routes[0].distance < res.listOrderDistance);
+});
+
+test("終点を別の地点にするときは、表の最後（n+1）を終点として使う", () => {
+  const stops = randomPoints(6, 71);
+  const end = { lat: 36.41, lon: 139.09 };
+  const pts = [start, ...stops, end];
+  const matrix = asymmetricMatrix(pts, 9);
+  const { routes } = planRoutes(start, stops, { matrix, end });
+  const M = pts.length;
+  let best = Infinity;
+  const perm = (rest, cur, len) => {
+    if (!rest.length) { best = Math.min(best, len + matrix[cur * M + M - 1]); return; }
+    rest.forEach((p, i) => perm(rest.filter((_, j) => j !== i), p, len + matrix[cur * M + p]));
+  };
+  perm([1, 2, 3, 4, 5, 6], 0, 0);
+  assert.ok(Math.abs(routes[0].distance - best) < 1e-6);
+});

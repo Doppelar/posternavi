@@ -12,7 +12,7 @@ const table = (text) => C.readTable(new TextEncoder().encode(text).buffer);
 const st = C.readTable(buf("data/sample.csv"));
 const sm = C.autoMapping(st.headers, st.rows);
 const sample = C.buildBoards(st, sm);
-check(C.mappingProblems(sm).ok && sample.boards.length === 24 && sample.issues.length === 0, "見本24件を列選択なしで読める");
+check(C.mappingProblems(sm).ok && sample.boards.length === 30 && sample.issues.length === 0, "見本30件を列選択なしで読める");
 
 // 自治体のオープンデータでよく使われる見出しの形（値は架空）
 const y = table("No.,図面表示番号,設置場所,掲示場名,緯度,経度\n1,1-1,架空市1丁目,見本A,35.31,139.62\n2,1-10,架空市2丁目,見本B,35.32,139.63\n");

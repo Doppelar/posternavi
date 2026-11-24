@@ -1,6 +1,6 @@
 // 画面（準備・ルート・班ごとの巡回・地図・CSV の取り込み）。
 import * as C from "./core.js";
-import { routeDistance } from "./tsp.js";
+import { insidePolygon } from "./roads.js";
 import {
   MAX_TEAMS, MODES, ROAD_FACTOR, estimateMinutes, formatDuration, formatRoadKm, remaining, routeText,
   stopCostMeters, teamColor, teamName,
@@ -10,8 +10,9 @@ import { clear, load, save } from "./store.js";
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-const DEFAULT_SETTINGS = { mode: "walking", workMin: 3, teams: 1, returnToStart: true, skipDone: true };
-const SAMPLE_START = { lat: 36.4485, lon: 139.0105, label: "見本の出発地点" };
+const DEFAULT_SETTINGS = { mode: "walking", workMin: 3, teams: 1, returnToStart: true, skipDone: true, roads: true };
+const CITY = { name: "小諸市", center: [36.3275, 138.4256], zoom: 13 };
+const SAMPLE_START = { lat: 36.32653, lon: 138.42554, label: "見本の出発地点" };
 const BUSY_TEXT = "ルートを計算しています…";
 
 const saved = load() || {};
@@ -19,7 +20,8 @@ const state = {
   list: saved.list || null, // { name, boards: [{ number, name, address, lat, lon }] }
   start: saved.start || null, // { lat, lon, label }
   settings: { ...DEFAULT_SETTINGS, ...saved.settings },
-  plan: saved.plan || null, // { routes: [{ numbers, distance }], start, mode, workMin, returnToStart, exact, baseline }
+  // { routes: [{ numbers, distance, path, fromHere }], start, mode, workMin, returnToStart, roads, exact, baseline, unsnapped }
+  plan: saved.plan || null,
   done: saved.done || {}, // 番号 → 貼った時刻
   team: saved.team || 0,
 };
@@ -27,6 +29,12 @@ let view = state.plan ? "plan" : "setup";
 let importDraft = null; // { name, table, mapping }
 let importReport = null; // { count, issues, outsideJapan }
 let pickPoint = null;
+let boundary = null; // 市の境界（[[lat, lon], ...] の輪の並び）
+
+/** 市の中か（境界を読めていないときは中として扱う）。 */
+const inCity = (p) => !boundary || insidePolygon(p, boundary);
+/** 道のりに掛ける係数（道に沿って計算したルートは 1）。 */
+const factorOf = (plan) => (plan.roads ? 1 : ROAD_FACTOR);
 
 function persist() {
   const { list, start, settings, plan, done, team } = state;
@@ -73,9 +81,10 @@ function render() {
 }
 
 function renderSetup(v) {
-  setHeader("ポスターナビ", state.plan ? "plan" : null);
+  setHeader("ポスターナビ 小諸市", state.plan ? "plan" : null);
   const { list, start, settings } = state;
   const dc = doneCount();
+  const outside = list ? list.boards.filter((b) => !inCity(b)).length : 0;
   const ready = list?.boards.length && start;
   const report = importReport
     ? `<div class="note">${importReport.count}か所を取り込みました。${importReport.issues.length ? `取り込めなかった行が${importReport.issues.length}行あります。` : ""}
@@ -83,10 +92,12 @@ function renderSetup(v) {
         ${importReport.issues.length ? `<details><summary>取り込めなかった行</summary><ul>${importReport.issues.slice(0, 50).map((i) => `<li>${i.line}行目: ${esc(i.reason)}</li>`).join("")}</ul></details>` : ""}</div>`
     : "";
   v.innerHTML = `
+    <p class="intro">小諸市の道路データ（OpenStreetMap）を使って、道に沿った距離で、掲示場を回る短い順番を探します。</p>
     <section class="card">
       <h2><span class="step">1</span>掲示場の一覧</h2>
       ${list ? `<p><b>${esc(list.name)}</b>　${list.boards.length}か所${dc ? `（貼り終えた ${dc}か所）` : ""}</p>` : `<p class="muted">まだありません。CSV を読み込むか、見本で試してください。</p>`}
       ${report}
+      ${outside ? `<p class="warn">小諸市の外にある掲示場が${outside}か所あります。道路データは市の周り約1kmまでなので、遠い掲示場は直線距離で見積もります。</p>` : ""}
       <div class="row">
         <button class="btn" data-act="csv">CSVを読み込む</button>
         <button class="btn outline" data-act="sample">見本を入れる</button>
@@ -97,12 +108,13 @@ function renderSetup(v) {
     <section class="card">
       <h2><span class="step">2</span>出発地点</h2>
       ${start ? `<p><b>${esc(start.label || "出発地点")}</b><br><span class="muted">${fmtLatLon(start)}</span></p>` : `<p class="muted">まだ決めていません。</p>`}
+      ${start && !inCity(start) ? `<p class="warn">出発地点が小諸市の外です。道から遠いときは、出発地点からの距離を直線で見積もります。</p>` : ""}
       <div class="row">
         <button class="btn" data-act="pick">地図で選ぶ</button>
         <button class="btn outline" data-act="here">現在地を使う</button>
       </div>
       <form class="inline" data-form="latlon">
-        <input name="ll" inputmode="decimal" autocomplete="off" placeholder="緯度,経度　例: 36.4485,139.0105" aria-label="緯度,経度">
+        <input name="ll" inputmode="decimal" autocomplete="off" placeholder="緯度,経度　例: 36.3265,138.4255" aria-label="緯度,経度">
         <button class="btn small outline">決める</button>
       </form>
     </section>
@@ -115,6 +127,7 @@ function renderSetup(v) {
       <label class="field">1か所の作業時間<span><input type="number" name="workMin" min="0" max="60" step="1" value="${settings.workMin}"> 分</span></label>
       <label class="field">何人（何班）で分けるか<span><input type="number" name="teams" min="1" max="${MAX_TEAMS}" step="1" value="${settings.teams}"> 班</span></label>
       <label class="check"><input type="checkbox" name="returnToStart" ${settings.returnToStart ? "checked" : ""}> 最後に出発地点へ戻る</label>
+      <label class="check"><input type="checkbox" name="roads" ${settings.roads ? "checked" : ""}> 道に沿った距離で計算する（車は一方通行も守る）</label>
       ${dc ? `<label class="check"><input type="checkbox" name="skipDone" ${settings.skipDone ? "checked" : ""}> 貼り終えた${dc}か所は除く</label>` : ""}
     </section>
 
@@ -170,21 +183,30 @@ function renderPlan(v) {
   const { total, dist, gain } = planSummary();
   const k = plan.routes.length;
   const boards = byNumber();
+  const f = factorOf(plan);
+  const how = plan.roads
+    ? `道に沿った距離（OpenStreetMap の道路データ${plan.mode === "driving" ? "。一方通行も守る" : ""}）で${plan.exact ? "、最短の順です。" : "、十分に短い順です（最短とは限りません）。"}`
+    : `直線距離で${plan.exact ? "、最短の順です。" : "、十分に短い順です（最短とは限りません）。"}道のりは、直線距離の${ROAD_FACTOR}倍で見積もった目安です。`;
+  const far = plan.unsnapped?.length
+    ? `<p class="warn">道から400m以上離れていた掲示場（${plan.unsnapped.slice(0, 10).map(esc).join("、")}${plan.unsnapped.length > 10 ? " ほか" : ""}）は、直線距離×${ROAD_FACTOR}で見積もりました。緯度・経度を確かめてください。</p>`
+    : "";
+  const farStart = plan.startUnsnapped ? `<p class="warn">出発地点が道から400m以上離れているため、出発地点からの距離は直線で見積もりました。</p>` : "";
   v.innerHTML = `
     <section class="card">
       <h2>${k > 1 ? `${total}か所を${k}班に分けました` : `${total}か所を回るルート`}</h2>
-      <p>道のり ${formatRoadKm(dist)}（${MODES[plan.mode]?.label}・1か所${plan.workMin}分）${plan.returnToStart ? "・出発地点に戻る" : ""}</p>
-      ${gain > 0.001 ? `<p class="good">一覧の順に回るより <b>${Math.round(gain * 100)}%</b> 短くなりました（${formatRoadKm(plan.baseline)} → ${formatRoadKm(plan.routes[0].distance)}）</p>` : ""}
-      <p class="hint">${plan.exact ? "直線距離で、最短の順です。" : "直線距離で十分に短い順です（最短とは限りません）。"}道のりと時間は、直線距離の${ROAD_FACTOR}倍で見積もった目安です。</p>
+      <p>道のり ${formatRoadKm(dist, f)}（${MODES[plan.mode]?.label}・1か所${plan.workMin}分）${plan.returnToStart ? "・出発地点に戻る" : ""}</p>
+      ${gain > 0.001 ? `<p class="good">一覧の順に回るより <b>${Math.round(gain * 100)}%</b> 短くなりました（${formatRoadKm(plan.baseline, f)} → ${formatRoadKm(plan.routes[0].distance, f)}）</p>` : ""}
+      <p class="hint">${how}時間は、${MODES[plan.mode]?.label}${MODES[plan.mode]?.kmh}km/h と作業時間から出した目安です。</p>
+      ${far}${farStart}
     </section>
     <ul class="teams">
       ${plan.routes.map((r, i) => {
         const left = remaining(r.numbers, state.done).length;
-        const min = estimateMinutes(r.distance, r.numbers.length, plan.mode, plan.workMin);
+        const min = estimateMinutes(r.distance, r.fromHere ? left : r.numbers.length, plan.mode, plan.workMin, f);
         const first = boards.get(r.numbers[0]);
         return `<li><button class="team" data-act="team" data-i="${i}" style="--c:${teamColor(i)}">
           <span class="dot"></span>
-          <span class="tmain"><b>${teamName(i, k)}</b>　${r.numbers.length}か所・${formatRoadKm(r.distance)}・${formatDuration(min)}
+          <span class="tmain"><b>${teamName(i, k)}</b>　${r.numbers.length}か所・${r.fromHere ? "残り" : ""}${formatRoadKm(r.distance, f)}・${formatDuration(min)}
             <small>${left ? `残り${left}か所` : "すべて貼り終えました"}${first ? `・最初は ${esc(first.number)} ${esc(first.name)}` : ""}</small></span>
           <span class="chev" aria-hidden="true">›</span></button></li>`;
       }).join("")}
@@ -207,7 +229,8 @@ function renderTeam(v) {
   const next = rest[0];
   const pos = next ? list.indexOf(next) + 1 : 0;
   const batch = rest.slice(0, C.MAX_WAYPOINTS + 1);
-  const min = estimateMinutes(r.distance, r.numbers.length, plan.mode, plan.workMin);
+  const f = factorOf(plan);
+  const min = estimateMinutes(r.distance, r.fromHere ? rest.length : r.numbers.length, plan.mode, plan.workMin, f);
   v.innerHTML = `
     <section class="card next" style="--c:${teamColor(i)}">
       ${next ? `
@@ -222,7 +245,7 @@ function renderTeam(v) {
       : `<h2>この班はすべて貼り終えました</h2>
         ${plan.returnToStart ? `<a class="btn wide" href="${esc(navUrl([plan.start]))}" target="_blank" rel="noopener">出発地点へ戻る案内</a>` : ""}`}
     </section>
-    <p class="muted small">${list.length}か所・${formatRoadKm(r.distance)}・${formatDuration(min)}・貼った ${list.length - rest.length}か所</p>
+    <p class="muted small">${list.length}か所・${r.fromHere ? "現在地から残り" : ""}${formatRoadKm(r.distance, f)}・${formatDuration(min)}・貼った ${list.length - rest.length}か所</p>
     <ol class="stops">
       ${list.map((b, idx) => `
         <li class="${state.done[b.number] ? "done" : ""} ${b === next ? "current" : ""}">
@@ -261,7 +284,8 @@ function ensureMap() {
   map = L.map("map", { preferCanvas: true });
   const opts = {
     maxZoom: 18,
-    attribution: '出典: <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">国土地理院</a>',
+    attribution: '出典: <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">国土地理院</a>'
+      + ' | 道路: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
   };
   const pale = L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png", opts).addTo(map);
   const std = L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png", opts);
@@ -283,6 +307,7 @@ function updateMap() {
   if (!show) return;
   if (!ensureMap()) { $("#mapwrap").hidden = true; return; }
   layer.clearLayers();
+  if (boundary) L.polygon(boundary.map((r) => r.map(([la, lo]) => [la, lo])), { color: "#444", weight: 2, dashArray: "6 6", fill: false, interactive: false }).addTo(layer);
   const pts = [];
   const plan = state.plan;
   const boards = byNumber();
@@ -295,7 +320,7 @@ function updateMap() {
     map.invalidateSize();
     if (around) map.setView([around.lat, around.lon], Math.max(map.getZoom() || 0, 15));
     else if (state.list?.boards.length) map.fitBounds(state.list.boards.map((b) => [b.lat, b.lon]), { padding: [20, 20] });
-    else map.setView([36.39, 139.06], 9);
+    else map.setView(CITY.center, CITY.zoom);
     return;
   }
   const end = plan.returnToStart ? plan.start : null;
@@ -304,8 +329,8 @@ function updateMap() {
     const r = plan.routes[i];
     if (!r) continue;
     const list = r.numbers.map((n) => boards.get(n)).filter(Boolean);
-    const line = [plan.start, ...list, ...(end ? [end] : [])].map((p) => [p.lat, p.lon]);
-    L.polyline(line, { color: teamColor(i), weight: 3, opacity: 0.75 }).addTo(layer);
+    const line = r.path || [plan.start, ...list, ...(end ? [end] : [])].map((p) => [p.lat, p.lon]);
+    L.polyline(line, { color: teamColor(i), weight: plan.roads ? 4 : 3, opacity: 0.75 }).addTo(layer);
     const numbered = view === "team" && list.length <= 400;
     list.forEach((b, idx) => {
       const done = !!state.done[b.number];
@@ -324,8 +349,8 @@ function updateMap() {
 }
 
 // ---------- 計算 ----------
-function solve(start, stops, options) {
-  const inPage = () => import("./tsp.js").then((T) => T.planRoutes(start, stops, options));
+function solve(request) {
+  const inPage = () => import("./solve.js").then((m) => m.solve(request));
   let worker;
   try {
     worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
@@ -343,8 +368,19 @@ function solve(start, stops, options) {
       worker.terminate();
       inPage().then(resolve, reject); // module worker が使えないブラウザでは画面の中で計算する
     };
-    worker.postMessage({ start, stops, options });
+    worker.postMessage(request);
   });
+}
+
+/** 道に沿って計算し、道路データを読めなければ直線距離で計算し直す。 */
+async function solveWithFallback(request) {
+  if (!request.roads) return solve(request);
+  try {
+    return await solve(request);
+  } catch (err) {
+    toast(`道路データで計算できなかったので、直線距離で計算しました（${err.message}）。`);
+    return solve({ ...request, roads: false });
+  }
 }
 
 async function solveAll() {
@@ -352,18 +388,24 @@ async function solveAll() {
   const stops = settings.skipDone ? list.boards.filter((b) => !state.done[b.number]) : list.boards;
   if (!stops.length) return toast("回る掲示場がありません（すべて貼り終えています）。");
   const teams = Math.max(1, Math.min(MAX_TEAMS, Math.floor(settings.teams) || 1));
-  const end = settings.returnToStart ? start : null;
-  setBusy(BUSY_TEXT);
+  setBusy(settings.roads ? "道路データを読み込んで、ルートを計算しています…" : BUSY_TEXT);
   try {
-    const result = await solve(start, stops, {
-      end, teams, stopCost: stopCostMeters(settings.mode, settings.workMin), timeLimitMs: 2500,
+    const result = await solveWithFallback({
+      start, stops, mode: settings.mode, roads: settings.roads,
+      options: {
+        returnToStart: settings.returnToStart, teams, timeLimitMs: 2500,
+        stopCost: stopCostMeters(settings.mode, settings.workMin, settings.roads ? 1 : ROAD_FACTOR),
+      },
     });
+    const roads = !!result.routes[0]?.path;
     state.plan = {
       createdAt: Date.now(),
-      start, mode: settings.mode, workMin: settings.workMin, returnToStart: settings.returnToStart,
+      start, mode: settings.mode, workMin: settings.workMin, returnToStart: settings.returnToStart, roads,
       exact: result.exact,
-      baseline: result.routes.length === 1 ? routeDistance(start, stops, end) : null,
-      routes: result.routes.map((r) => ({ numbers: r.order.map((i) => stops[i].number), distance: r.distance })),
+      baseline: result.routes.length === 1 ? result.listOrderDistance : null,
+      unsnapped: (result.unsnapped || []).map((i) => stops[i].number),
+      startUnsnapped: !!result.startUnsnapped,
+      routes: result.routes.map((r) => ({ numbers: r.order.map((i) => stops[i].number), distance: r.distance, path: r.path || null })),
     };
     state.team = 0;
     persist();
@@ -393,11 +435,16 @@ async function replanTeam() {
   setBusy(BUSY_TEXT);
   try {
     const end = plan.returnToStart ? plan.start : null;
-    const result = await solve(here, rest, { end, timeLimitMs: 2500 });
-    const order = result.routes[0].order.map((i) => rest[i]);
+    const result = await solveWithFallback({ start: here, stops: rest, mode: plan.mode, roads: plan.roads, options: { end, timeLimitMs: 2500 } });
+    const route = result.routes[0];
+    const order = route.order.map((i) => rest[i]);
     const doneOnes = r.numbers.filter((n) => state.done[n]);
     r.numbers = [...doneOnes, ...order.map((b) => b.number)];
-    r.distance = routeDistance(plan.start, r.numbers.map((n) => boards.get(n)).filter(Boolean), end);
+    // ここからの残りの道のり。線も現在地から引く（直線で計算したときも、出発地点からではなく現在地から）
+    // 道路データで計算できず直線になったときは、道のりの目安（直線×係数）にそろえる
+    r.distance = route.distance * (plan.roads && !route.path ? ROAD_FACTOR : 1);
+    r.fromHere = true;
+    r.path = route.path || [here, ...order, ...(end ? [end] : [])].map((p) => [p.lat, p.lon]);
     persist();
     toast("残りの順番を、現在地から引き直しました。");
   } catch (err) {
@@ -463,7 +510,7 @@ async function applySample() {
     const table = C.readTable(await res.arrayBuffer());
     const { boards } = C.buildBoards(table, C.autoMapping(table.headers, table.rows));
     applyList("見本（架空の掲示場）", boards, null);
-    if (!state.start) state.start = SAMPLE_START;
+    if (!state.start || !inCity(state.start)) state.start = SAMPLE_START;
     persist();
     toast("見本を入れました。位置は架空です。");
     render();
@@ -481,8 +528,9 @@ function teamText(i) {
     title: teamName(i, plan.routes.length),
     boards: r.numbers.map((n) => boards.get(n)).filter(Boolean),
     distance: r.distance,
-    minutes: estimateMinutes(r.distance, r.numbers.length, plan.mode, plan.workMin),
+    minutes: estimateMinutes(r.distance, r.fromHere ? remaining(r.numbers, state.done).length : r.numbers.length, plan.mode, plan.workMin, factorOf(plan)),
     done: state.done,
+    factor: factorOf(plan),
   });
 }
 
@@ -563,7 +611,7 @@ $("#view").addEventListener("change", (e) => {
   if (el.name === "mode") s.mode = el.value;
   else if (el.name === "workMin") s.workMin = Math.max(0, Math.min(60, Math.round(+el.value) || 0));
   else if (el.name === "teams") s.teams = Math.max(1, Math.min(MAX_TEAMS, Math.round(+el.value) || 1));
-  else if (el.name === "returnToStart" || el.name === "skipDone") s[el.name] = el.checked;
+  else if (["returnToStart", "skipDone", "roads"].includes(el.name)) s[el.name] = el.checked;
   else return;
   persist();
 });
@@ -572,7 +620,7 @@ $("#view").addEventListener("submit", (e) => {
   if (e.target.dataset.form !== "latlon") return;
   e.preventDefault();
   const p = C.parseLatLon(e.target.ll.value);
-  if (!p) return toast("「緯度,経度」の形で入れてください（例: 36.4485,139.0105）。");
+  if (!p) return toast("「緯度,経度」の形で入れてください（例: 36.3265,138.4255）。");
   state.start = { ...p, label: "入力した地点" };
   persist();
   render();
@@ -587,5 +635,10 @@ $("#csvfile").addEventListener("change", (e) => {
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
   navigator.serviceWorker.register("sw.js").catch(() => { /* オフライン対応なしでも動く */ });
 }
+
+fetch("data/komoro-boundary.json")
+  .then((res) => (res.ok ? res.json() : null))
+  .then((data) => { if (data?.rings) { boundary = data.rings; render(); } })
+  .catch(() => { /* 境界がなくても動く（市の外の警告と境界線が出ないだけ） */ });
 
 render();

@@ -13,6 +13,12 @@ test("所要時間 = 道のり（直線×係数）÷速さ + 作業時間", () =
   assert.equal(estimateMinutes(0, 4, "driving", 2), 8);
 });
 
+test("道に沿って計算したときは係数を掛けない", () => {
+  assert.equal(Math.round(estimateMinutes(4000, 0, "walking", 3, 1)), 60);
+  assert.equal(formatRoadKm(12345, 1), "約12.3km");
+  assert.ok(Math.abs(estimateMinutes(stopCostMeters("driving", 4, 1), 0, "driving", 0, 1) - 4) < 1e-9);
+});
+
 test("作業時間を距離に換算すると、同じ時間で進める直線距離になる", () => {
   for (const mode of ["walking", "bicycling", "driving"]) {
     const m = stopCostMeters(mode, 6);

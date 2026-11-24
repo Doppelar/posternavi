@@ -1,13 +1,13 @@
 // オフライン対応。アプリ本体は先に保存し、地図タイルは見た分だけ保存する。
 // 掲示場巡回 PWA（MIT License、Copyright (c) 2026 TOYOTAKA）の sw.js をもとにしている。
-const VERSION = "v1";
+const VERSION = "v2";
 const SHELL = `posternavi-shell-${VERSION}`;
 const TILES = "posternavi-tiles-v1";
 const MAX_TILES = 3000;
 const FILES = [
   "./", "index.html", "style.css", "manifest.webmanifest",
-  "js/app.js", "js/core.js", "js/store.js", "js/tsp.js", "js/plan.js", "js/worker.js",
-  "data/sample.csv", "icons/icon-192.png", "icons/icon-512.png", "icons/icon-180.png",
+  "js/app.js", "js/core.js", "js/store.js", "js/tsp.js", "js/plan.js", "js/worker.js", "js/solve.js", "js/roads.js",
+  "data/sample.csv", "data/komoro.json", "data/komoro-boundary.json", "icons/icon-192.png", "icons/icon-512.png", "icons/icon-180.png",
 ];
 // 地図の部品（Leaflet 1.9.4、版を固定し改ざん検出つきで読み込む）
 const LEAFLET = [

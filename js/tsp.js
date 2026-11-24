@@ -35,25 +35,35 @@ export function rng(seed = 1) {
 
 /**
  * 距離の表を作る。添字 0 = 出発地、1..n = 掲示場、n+1 = 終点。
- * 終点は end の地点（出発地に戻るなら出発地）。end が null なら、全点への距離が 0 の仮の点
- * （どこで終えてもよい）。
+ * endKind: "start"（出発地に戻る）・"point"（endPoint で終わる）・"free"（どこで終えてもよい。
+ * 全点への距離が 0 の仮の点を終点にする）。
+ * matrix を渡すと、直線距離の代わりに使う（行 i → 列 j、添字 0..n。"point" のときは n+1 も）。
+ * 返り値の D は探索用（向きで違う距離は往復の平均）、Dd は実際の向きの距離。
  */
-function buildProblem(start, stops, end) {
+function buildProblem(start, stops, endKind, endPoint, matrix) {
   const n = stops.length;
   const N = n + 2;
   const pts = [start, ...stops];
-  const D = new Float64Array(N * N);
+  const M = matrix ? Math.round(Math.sqrt(matrix.length)) : 0;
+  const dd = matrix ? (i, j) => matrix[i * M + j] : (i, j) => distance(pts[i], pts[j]);
+  const toEnd = (i) => {
+    if (endKind === "free") return 0;
+    if (endKind === "start") return i === 0 ? 0 : dd(i, 0);
+    return matrix ? matrix[i * M + n + 1] : distance(pts[i], endPoint);
+  };
+  const Dd = new Float64Array(N * N);
   for (let i = 0; i <= n; i++) {
-    for (let j = i + 1; j <= n; j++) {
-      const d = distance(pts[i], pts[j]);
-      D[i * N + j] = d;
-      D[j * N + i] = d;
-    }
-    const e = end ? distance(pts[i], end) : 0; // 終点（n+1）までの距離
-    D[i * N + n + 1] = e;
-    D[(n + 1) * N + i] = e;
+    for (let j = 0; j <= n; j++) if (i !== j) Dd[i * N + j] = dd(i, j);
+    Dd[i * N + n + 1] = toEnd(i);
+    Dd[(n + 1) * N + i] = Dd[i * N + n + 1];
   }
-  return { N, D, s: 0, e: n + 1 };
+  if (!matrix) return { N, D: Dd, Dd, s: 0, e: n + 1 };
+  const D = Dd.slice();
+  for (let i = 1; i <= n; i++) {
+    for (let j = i + 1; j <= n; j++) D[i * N + j] = D[j * N + i] = (Dd[i * N + j] + Dd[j * N + i]) / 2;
+  }
+  for (let j = 1; j <= n; j++) D[j * N] = Dd[j]; // 出発地との辺は、出ていく向きの距離にそろえる
+  return { N, D, Dd, s: 0, e: n + 1 };
 }
 
 /** 道順（ノードの並び）の長さ。 */
@@ -247,11 +257,12 @@ function doubleBridge(tour, rand) {
 
 /**
  * s → interior すべて → e の道順を求める。返り値は interior の並び（s と e を含まない）。
+ * 厳密に解くときは向きつきの距離 Dd を使い、近似では向きをそろえた D を使う。
  * options: { timeLimitMs, maxKicks, seed, now, exactLimit }
  */
-function solvePath(D, N, s, e, interior, options = {}) {
+function solvePath(D, N, s, e, interior, options = {}, Dd = D) {
   const exactLimit = Math.min(options.exactLimit ?? EXACT_LIMIT, EXACT_LIMIT);
-  if (interior.length <= exactLimit) return { order: solveExact(D, N, s, e, interior), exact: true };
+  if (interior.length <= exactLimit) return { order: solveExact(Dd, N, s, e, interior), exact: true };
   const { timeLimitMs = 1500, maxKicks = Infinity, seed = 1, now = () => Date.now() } = options;
   const nodes = [s, ...interior, e];
   const neighbors = neighborLists(D, N, nodes, Math.min(12, nodes.length - 1));
@@ -319,36 +330,44 @@ function splitOrder(D, N, s, e, order, teams, stopCost) {
  *   returnToStart (true)  出発地に戻るか
  *   end                   終点を出発地以外にするときの地点 { lat, lon }（null ならどこで終えてもよい）。
  *                         指定すると returnToStart より優先する
+ *   matrix                道に沿った距離の表など（buildProblem を参照）。なければ直線距離
  *   teams (1)             何人（何班）で分けるか
  *   stopCost (0)          1か所あたりの作業を距離に換算した量（班の重さの釣り合いに使う）
  *   timeLimitMs, maxKicks, seed  計算の打ち切り
- * 返り値: { routes: [{ order: stops の添字の並び, distance }], exact }
+ * 返り値: { routes: [{ order: stops の添字の並び, distance }], exact, listOrderDistance（一覧の順に回った道のり） }
  */
 export function planRoutes(start, stops, options = {}) {
   const { returnToStart = true, teams = 1, stopCost = 0 } = options;
-  const end = options.end !== undefined ? options.end : returnToStart ? start : null;
+  const endKind = options.end ? "point" : options.end === null || !returnToStart ? "free" : "start";
+  const { matrix } = options;
   const n = stops.length;
-  if (!n) return { routes: [], exact: true };
-  const { N, D, s, e } = buildProblem(start, stops, end);
+  if (!n) return { routes: [], exact: true, listOrderDistance: 0 };
+  const { N, D, Dd, s, e } = buildProblem(start, stops, endKind, options.end, matrix);
   const interior = Array.from({ length: n }, (_, i) => i + 1);
   const k = Math.max(1, Math.min(Math.floor(teams) || 1, n));
   // 分けるときは、出発地に戻る輪を作ってから切る（出発地のまわりを扇形に分けた形になる）
-  const ringEnd = k > 1 ? buildProblem(start, stops, start) : null;
+  const ringEnd = k > 1 ? buildProblem(start, stops, "start", null, matrix) : null;
   const whole = ringEnd
-    ? solvePath(ringEnd.D, ringEnd.N, ringEnd.s, ringEnd.e, interior, options)
-    : solvePath(D, N, s, e, interior, options);
+    ? solvePath(ringEnd.D, ringEnd.N, ringEnd.s, ringEnd.e, interior, options, ringEnd.Dd)
+    : solvePath(D, N, s, e, interior, options, Dd);
   const groups = k > 1
     ? splitOrder(D, N, s, e, whole.order, k, stopCost).map(([from, to]) => whole.order.slice(from, to))
     : [whole.order];
   let exact = whole.exact && k === 1;
   const routes = groups.map((group, gi) => {
     const solved = k > 1
-      ? solvePath(D, N, s, e, group, { ...options, timeLimitMs: (options.timeLimitMs ?? 1500) / k, seed: (options.seed ?? 1) + gi })
+      ? solvePath(D, N, s, e, group, { ...options, timeLimitMs: (options.timeLimitMs ?? 1500) / k, seed: (options.seed ?? 1) + gi }, Dd)
       : { order: group };
-    const tour = [s, ...solved.order, e];
-    return { order: solved.order.map((v) => v - 1), distance: pathLength(D, N, tour) };
+    let order = solved.order;
+    let len = pathLength(Dd, N, [s, ...order, e]);
+    if (endKind === "start" && Dd !== D) { // 一方通行があると、逆回りのほうが短いことがある
+      const rev = [...order].reverse();
+      const revLen = pathLength(Dd, N, [s, ...rev, e]);
+      if (revLen < len - EPS) { order = rev; len = revLen; }
+    }
+    return { order: order.map((v) => v - 1), distance: len };
   });
-  return { routes, exact };
+  return { routes, exact, listOrderDistance: pathLength(Dd, N, [s, ...interior, e]) };
 }
 
 /** 決まった順に回ったときの道のり。end は終点（null なら最後の掲示場で終わる）。 */

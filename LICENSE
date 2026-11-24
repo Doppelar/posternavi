@@ -3,6 +3,10 @@ MIT License
 Copyright (c) 2026 Doppelar
 Copyright (c) 2026 TOYOTAKA (js/core.js, sw.js, test/core.test.mjs and test/fixtures/ are based on keijiba-patrol-pwa)
 
+This license covers the program. data/komoro.json and data/komoro-boundary.json are derived from
+OpenStreetMap data (c) OpenStreetMap contributors and are licensed under the Open Database License
+(ODbL) 1.0: https://opendatacommons.org/licenses/odbl/
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
