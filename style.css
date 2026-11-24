@@ -136,3 +136,19 @@ body.busy #busy { display: grid; }
 }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 .intro { margin: 0 4px 12px; font-size: 14px; color: var(--muted); }
+.results { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
+.results:empty { display: none; }
+.result {
+  width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: #F8FAFC; font: inherit; font-size: 15px; color: inherit; text-align: left; cursor: pointer;
+}
+.result:hover, .result:focus-visible { border-color: var(--brand); background: #EEF5FC; }
+.result small { flex: none; color: var(--muted); font-size: 12px; }
+.chosen { background: #EEF5FC; border-radius: 10px; padding: 8px 12px; }
+details.ll { margin-top: 10px; font-size: 14px; }
+details.ll summary { font-weight: 400; color: var(--muted); }
+input[type="search"] {
+  font: inherit; font-size: 16px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff;
+}
+.card .seg { margin: 8px 0; }

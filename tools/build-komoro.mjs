@@ -1,8 +1,9 @@
 // 小諸市の道路網と市の境界（OpenStreetMap）を、アプリで使う形にする。
 //   data/komoro.json          道路網（ルートの計算用。Web Worker が読む）
 //   data/komoro-boundary.json 市の境界と中心（地図と、市の外かどうかの判定用）
+//   data/komoro-places.json   駅・役所・学校・地区名など（出発地点・終点を名前で探す用）
 //
-//   node tools/build-komoro.mjs <roads.json> <boundary.json>
+//   node tools/build-komoro.mjs <roads.json> <boundary.json> [places.json]
 //
 // roads.json と boundary.json は Overpass API から取得したもの（下の QUERIES）。
 // 道路データは © OpenStreetMap contributors、ODbL 1.0。できたファイルも ODbL で公開する。
@@ -12,7 +13,49 @@ export const QUERIES = {
   // 小諸市（OSM relation 3594017）の範囲より約1km広い四角の道路
   roads: '[out:json][timeout:180][bbox:36.266,138.352,36.425,138.518];(way["highway"~"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|living_street|service|track|road|pedestrian|footway|path|steps|cycleway|bridleway)$"];);out body;>;out skel qt;',
   boundary: "[out:json][timeout:100];rel(3594017);out geom;",
+  places: '[out:json][timeout:120][bbox:36.266,138.352,36.425,138.518];(nwr["name"]["railway"~"^(station|halt)$"];nwr["name"]["public_transport"="station"];nwr["name"]["amenity"~"^(townhall|school|community_centre|library|post_office|hospital|clinic|police|fire_station|kindergarten|childcare|place_of_worship|parking|bus_station|social_facility|university|college|marketplace|fuel)$"];nwr["name"]["shop"~"^(supermarket|convenience|department_store|mall|doityourself|hardware)$"];nwr["name"]["leisure"~"^(park|sports_centre|stadium|pitch|playground)$"];nwr["name"]["tourism"];nwr["name"]["historic"];nwr["name"]["office"="government"];nwr["name"]["place"~"^(suburb|neighbourhood|quarter|village|hamlet|locality|isolated_dwelling)$"];nwr["name"]["highway"="bus_stop"];);out center tags;',
 };
+
+/** 場所の種類（表示名と、候補に出す順の優先度。小さいほど先）。 */
+const KINDS = [
+  [(t) => t.railway === "station" || t.railway === "halt" || t.public_transport === "station", "駅", 0],
+  [(t) => t.amenity === "townhall" || t.office === "government", "役所", 1],
+  [(t) => ["suburb", "neighbourhood", "quarter", "village", "hamlet", "locality", "isolated_dwelling"].includes(t.place), "地区", 2],
+  [(t) => t.amenity === "community_centre", "公民館・集会所", 2],
+  [(t) => ["school", "kindergarten", "childcare", "university", "college"].includes(t.amenity), "学校・園", 3],
+  [(t) => ["library", "post_office", "hospital", "clinic", "police", "fire_station", "social_facility"].includes(t.amenity), "公共施設", 3],
+  [(t) => t.leisure, "公園・運動施設", 4],
+  [(t) => t.shop || t.amenity === "fuel" || t.amenity === "marketplace", "店", 5],
+  [(t) => t.amenity === "parking" || t.amenity === "bus_station" || t.highway === "bus_stop", "駐車場・バス停", 5],
+  [(t) => t.amenity === "place_of_worship", "寺社", 6],
+  [(t) => t.tourism || t.historic, "名所", 6],
+];
+
+/** OpenStreetMap によみが入っていない、よく使う場所のよみ（ひらがなで探せるように）。 */
+const READINGS = {
+  小諸駅: "こもろえき", 乙女駅: "おとめえき", 三岡駅: "みつおかえき", 御代田駅: "みよたえき",
+  小諸市役所: "こもろしやくしょ",
+};
+
+/** 名前のある場所を、[名前, 種類, 緯度, 経度, よみ] の並びにする（同じ名前・種類で300m以内のものは1つに）。 */
+export function buildPlaces(places) {
+  const out = [];
+  for (const e of places.elements) {
+    const t = e.tags || {};
+    const lat = e.lat ?? e.center?.lat, lon = e.lon ?? e.center?.lon;
+    if (lat == null || !t.name) continue;
+    const kind = KINDS.find(([test]) => test(t));
+    if (!kind) continue;
+    let name = t.name.trim();
+    if (kind[1] === "駅" && !name.endsWith("駅")) name += "駅";
+    const kana = t["name:ja-Hira"] || t["name:ja_kana"] || t["name:ja-Kana"] || READINGS[name] || "";
+    const dup = out.find((p) => p[0] === name && p[1] === kind[1] && haversine([p[2], p[3]], [lat, lon]) < 300);
+    if (dup) continue;
+    out.push([name, kind[1], +lat.toFixed(5), +lon.toFixed(5), kana, kind[2]]);
+  }
+  out.sort((a, b) => a[5] - b[5] || a[0].localeCompare(b[0], "ja"));
+  return out.map((p) => p.slice(0, 5));
+}
 
 const CAR_FWD = 1, CAR_BACK = 2, FOOT = 4, BIKE = 8;
 const NO = new Set(["no", "private"]);
@@ -166,7 +209,7 @@ export function build(roads, boundary) {
 }
 
 if (process.argv[1]?.endsWith("build-komoro.mjs")) {
-  const [roadsPath, boundaryPath] = process.argv.slice(2);
+  const [roadsPath, boundaryPath, placesPath] = process.argv.slice(2);
   if (!roadsPath || !boundaryPath) {
     console.error(`使い方: node tools/build-komoro.mjs <roads.json> <boundary.json>\nOverpass API の問い合わせ:\n${JSON.stringify(QUERIES, null, 2)}`);
     process.exit(1);
@@ -175,5 +218,10 @@ if (process.argv[1]?.endsWith("build-komoro.mjs")) {
   const json = JSON.stringify(roads);
   writeFileSync(new URL("../data/komoro.json", import.meta.url), json);
   writeFileSync(new URL("../data/komoro-boundary.json", import.meta.url), JSON.stringify(boundary));
+  if (placesPath) {
+    const places = buildPlaces(JSON.parse(readFileSync(placesPath, "utf8")));
+    writeFileSync(new URL("../data/komoro-places.json", import.meta.url), JSON.stringify({ v: 1, attribution: "© OpenStreetMap contributors (ODbL)", places }));
+    console.log(`places ${places.length}`);
+  }
   console.log(`nodes ${roads.nodes.length / 2}, edges ${roads.edges.a.length}, ${(json.length / 1024).toFixed(0)}KB`);
 }

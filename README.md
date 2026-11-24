@@ -9,8 +9,9 @@
 ## できること
 
 - **掲示場の一覧を CSV で取り込む**: 番号・掲示場名・緯度・経度（設置場所はあれば）。見出しの名前が違っても自動で割り当て、分からないときは画面で選べます。UTF-8・Shift_JIS に対応しています。
-- **出発地点を決める**: 地図を押す、現在地を使う、緯度・経度を入れる、のどれかで決めます。
-- **回り方を選ぶ**: 徒歩・自転車・車、1か所の作業時間、最後に出発地点へ戻るかどうか。
+- **出発地点を決める**: 駅・役所・学校・公民館・地区名などの名前（「小諸駅」など）や、住所（「相生町3」など）で探せます。掲示場の名前や番号でも探せます。地図を押す、現在地を使う、緯度・経度を入れる、でも決められます。
+- **終わる場所を決める**: 最後に出発地点へ戻るか、どこで終えてもよいか、別の終点（出発地点と同じ方法で決める）か。
+- **回り方を選ぶ**: 徒歩・自転車・車、1か所の作業時間。
 - **ルートを探す**: 道に沿った距離で解き、地図にも道に沿った線で描きます。一覧の順に回った場合と比べて、何%短くなったかも表示します。「道に沿った距離で計算する」を外すと、直線距離で計算します。
 - **小諸市の外の確認**: 市の境界を地図に点線で描き、市の外にある掲示場や出発地点を知らせます。
 - **人数で分ける**: 2〜20班に分けると、いちばん時間のかかる班ができるだけ短くなるように、出発地点のまわりを扇形に分けます。
@@ -61,6 +62,7 @@
   - **Google マップ**: 「案内」を押すと、目的地（と経由地）の位置が Google マップに渡ります。
   - **国土地理院**: 地図を表示するとき、見ている範囲の地図画像を取得します。
   - 道路データはこのアプリと一緒に配信するもので、道に沿った距離の計算は端末の中で行います。掲示場の位置を外に送ることはありません。
+  - **国土地理院の住所検索**: 出発地点・終点の「探す」を押すと、入れた言葉（頭に「長野県小諸市」を付けたもの）を国土地理院に送り、住所の位置を調べます。打っている間の候補は、同梱の一覧から端末の中で出します。
   - **unpkg**: 地図の部品（Leaflet）を取得します。
   - 「順番を送る」は、端末の共有機能かコピーを使います。送り先を選ぶまで、どこにも送りません。
 
@@ -70,7 +72,8 @@
 | --- | --- | --- |
 | [Leaflet](https://leafletjs.com/) 1.9.4 | 地図の表示（unpkg から版を固定し、改ざん検出つきで読み込む） | BSD-2-Clause |
 | [地理院タイル](https://maps.gsi.go.jp/development/ichiran.html) | 背景地図（淡色地図・標準地図） | 出典: 国土地理院 |
-| [OpenStreetMap](https://www.openstreetmap.org/copyright) | 小諸市の道路網と市の境界（`data/komoro.json`・`data/komoro-boundary.json`） | © OpenStreetMap contributors、[ODbL 1.0](https://opendatacommons.org/licenses/odbl/) |
+| [国土地理院 住所検索](https://msearch.gsi.go.jp/address-search/AddressSearch) | 出発地点・終点を住所で探す | 出典: 国土地理院 |
+| [OpenStreetMap](https://www.openstreetmap.org/copyright) | 小諸市の道路網・市の境界・場所の名前（`data/komoro.json`・`data/komoro-boundary.json`・`data/komoro-places.json`） | © OpenStreetMap contributors、[ODbL 1.0](https://opendatacommons.org/licenses/odbl/) |
 | Google マップ | 案内のときに、目的地を渡してアプリを開くだけ（[Maps URLs](https://developers.google.com/maps/documentation/urls/get-started)、API キー不要） | — |
 
 ## 掲示場データについて
@@ -97,21 +100,22 @@ npm test    # 試験（Node 22 以上）
 | `js/app.js` | 画面（準備・ルート・班ごとの巡回・地図・CSV の取り込み） |
 | `js/tsp.js` | ルートの計算（巡回セールスマン問題・班分け） |
 | `js/roads.js` | 道に沿った距離（道路網・吸着・ダイクストラ法・道に沿った線） |
+| `js/places.js` | 出発地点・終点を名前や住所で探す |
 | `js/solve.js` / `js/worker.js` | 計算の入口と、それを画面と別に動かす Web Worker |
 | `js/plan.js` | 所要時間の見積もり・送る文字など |
 | `js/core.js` | CSV の読み込み・列の割り当て・行の検査・Google マップの URL |
 | `js/store.js` | 端末内の保存 |
-| `data/komoro.json` / `data/komoro-boundary.json` | 小諸市の道路網と境界（`tools/build-komoro.mjs` で作成） |
+| `data/komoro.json` / `data/komoro-boundary.json` / `data/komoro-places.json` | 小諸市の道路網・境界・場所の名前（`tools/build-komoro.mjs` で作成） |
 | `sw.js` / `manifest.webmanifest` / `icons/` | オフライン対応とホーム画面への追加（アイコンは `tools/make-icons.mjs` で作成） |
 
 ### 道路データを新しくする
 
 1. `node tools/build-komoro.mjs` を引数なしで実行すると、Overpass API に送る問い合わせ（道路と境界）が表示されます。
-2. それぞれを [Overpass API](https://overpass-api.de/) に送り、結果を roads.json・boundary.json として保存します（公開サーバーは混み合うことがあるので、時間をおいて試してください）。
-3. `node tools/build-komoro.mjs roads.json boundary.json` で `data/` の2つのファイルを作り直し、`sw.js` の `VERSION` を上げます。
+2. それぞれを [Overpass API](https://overpass-api.de/) に送り、結果を roads.json・boundary.json・places.json として保存します（公開サーバーは混み合うことがあるので、時間をおいて試してください）。
+3. `node tools/build-komoro.mjs roads.json boundary.json places.json` で `data/` の3つのファイルを作り直し、`sw.js` の `VERSION` を上げます。
 
 ## 謝辞・ライセンス
 
 [掲示場巡回 PWA](https://github.com/ToyotakaTanaka/keijiba-patrol-pwa)（MIT License、Copyright (c) 2026 TOYOTAKA）を参考にしました。`js/core.js`・`sw.js`・`test/core.test.mjs`・`test/fixtures/` は、同プロジェクトのコードをもとにしています。
 
-プログラムは [MIT](LICENSE)。`data/komoro.json` と `data/komoro-boundary.json` は OpenStreetMap から作ったデータで、© OpenStreetMap contributors、[ODbL 1.0](https://opendatacommons.org/licenses/odbl/) です。
+プログラムは [MIT](LICENSE)。`data/komoro.json`・`data/komoro-boundary.json`・`data/komoro-places.json` は OpenStreetMap から作ったデータで、© OpenStreetMap contributors、[ODbL 1.0](https://opendatacommons.org/licenses/odbl/) です。
